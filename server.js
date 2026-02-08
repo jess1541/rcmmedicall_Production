@@ -5,35 +5,38 @@ const path = require('path');
 
 const app = express();
 
-// Middleware - Increased limit for bulk imports (50mb is usually enough for ~50k rows)
+// Middleware - Increased limit for bulk imports
 app.use(express.json({ limit: '50mb' })); 
 app.use(cors());
 
-// --- Database Connection (Sequelize) ---
-// Si existe DATABASE_URL, usa Postgres (Producción). Si no, usa SQLite local.
+// --- Database Connection ---
 const isProduction = !!process.env.DATABASE_URL;
 
 const sequelize = isProduction
     ? new Sequelize(process.env.DATABASE_URL, {
         dialect: 'postgres',
-        logging: false,
+        logging: false, // Set to console.log to debug SQL queries
         dialectOptions: {
             ssl: {
                 require: true,
                 rejectUnauthorized: false 
             }
+        },
+        pool: {
+            max: 10,
+            min: 0,
+            acquire: 30000,
+            idle: 10000
         }
       })
     : new Sequelize({
         dialect: 'sqlite',
-        storage: './database.sqlite', // Archivo local
-        logging: false
+        storage: './database.sqlite',
+        logging: false,
+        retry: { match: [/SQLITE_BUSY/], max: 10 }
       });
 
-// --- Models Definition ---
-
-// Usamos columnas JSON para 'visits' y 'schedule' para mantener compatibilidad 
-// total con el Frontend sin tener que reescribir toda la lógica relacional.
+// --- Models ---
 
 const Doctor = sequelize.define('Doctor', {
     id: {
@@ -42,8 +45,8 @@ const Doctor = sequelize.define('Doctor', {
         allowNull: false
     },
     category: { type: DataTypes.STRING, defaultValue: 'MEDICO' },
-    executive: DataTypes.STRING,
-    name: DataTypes.STRING,
+    executive: { type: DataTypes.STRING, defaultValue: 'SIN ASIGNAR' },
+    name: { type: DataTypes.STRING, allowNull: false },
     specialty: DataTypes.STRING,
     subSpecialty: DataTypes.STRING,
     address: DataTypes.TEXT,
@@ -55,13 +58,12 @@ const Doctor = sequelize.define('Doctor', {
     officeNumber: DataTypes.STRING,
     birthDate: DataTypes.STRING,
     cedula: DataTypes.STRING,
-    profile: DataTypes.TEXT, // Descripción larga
+    profile: DataTypes.TEXT,
     classification: DataTypes.STRING,
     socialStyle: DataTypes.STRING,
     attitudinalSegment: DataTypes.STRING,
     importantNotes: DataTypes.TEXT,
     isInsuranceDoctor: { type: DataTypes.BOOLEAN, defaultValue: false },
-    // Guardamos las visitas y horario como JSON para imitar la estructura NoSQL
     visits: { 
         type: DataTypes.JSON, 
         defaultValue: [] 
@@ -92,113 +94,105 @@ const Procedure = sequelize.define('Procedure', {
     status: DataTypes.STRING
 });
 
-// Sincronizar base de datos
-// 'alter: true' es CRÍTICO: actualiza las tablas si añades columnas nuevas sin borrar datos.
+// Sync DB
 sequelize.sync({ alter: true })
-    .then(() => console.log(isProduction ? "✅ PostgreSQL Conectado (Schema Synced)" : "✅ SQLite Local Conectado (Schema Synced)"))
-    .catch(err => console.error("❌ Error de Base de Datos:", err));
+    .then(() => console.log("✅ Base de Datos Sincronizada"))
+    .catch(err => console.error("❌ Error DB:", err));
 
 // --- API Routes ---
 
-// GET: Obtener todos los doctores
 app.get('/api/doctors', async (req, res) => {
     try {
         const doctors = await Doctor.findAll();
         res.json(doctors);
     } catch (error) {
-        console.error("Error fetching doctors:", error);
+        console.error("Error GET doctors:", error);
         res.status(500).json({ error: error.message });
     }
 });
 
-// POST: Crear o Actualizar Doctor (Individual)
 app.post('/api/doctors', async (req, res) => {
     const data = req.body;
     try {
-        // Upsert en Sequelize
         await Doctor.upsert(data);
         const result = await Doctor.findByPk(data.id);
         res.json(result);
     } catch (error) {
-        console.error("Error saving doctor:", error);
+        console.error("Error SAVE doctor:", error);
         res.status(500).json({ error: error.message });
     }
 });
 
-// POST: Carga Masiva de Doctores (Bulk Upsert)
+// Optimized Bulk Import for PostgreSQL
 app.post('/api/doctors/bulk', async (req, res) => {
-    const data = req.body; // Array of doctors
+    const data = req.body;
     if (!Array.isArray(data)) {
-        return res.status(400).json({ error: "Se esperaba un arreglo de datos." });
+        return res.status(400).json({ error: "Data must be an array" });
     }
     
-    console.log(`📥 Recibiendo solicitud masiva para ${data.length} registros...`);
+    console.log(`📥 Iniciando importación de ${data.length} registros...`);
+
+    // PostgreSQL parameter limit workaround: Process in chunks
+    const CHUNK_SIZE = 500; 
+    let processed = 0;
 
     try {
-        // Transaction asegura que o se guardan todos o ninguno
         await sequelize.transaction(async (t) => {
-            // Usamos bulkCreate con updateOnDuplicate para manejar inserts y updates eficientemente
-            await Doctor.bulkCreate(data, {
-                updateOnDuplicate: [
-                    'category', 'executive', 'name', 'specialty', 'subSpecialty', 
-                    'address', 'hospital', 'area', 'phone', 'email', 'floor', 
-                    'officeNumber', 'importantNotes', 'updatedAt'
-                ],
-                transaction: t
-            });
+            // Eliminar registros previos si es una carga full (Opcional, aquí solo insertamos)
+            // Si se desea limpiar la base antes: await Doctor.destroy({ where: {}, transaction: t });
+
+            for (let i = 0; i < data.length; i += CHUNK_SIZE) {
+                const chunk = data.slice(i, i + CHUNK_SIZE);
+                await Doctor.bulkCreate(chunk, {
+                    transaction: t,
+                    validate: true,
+                    // updateOnDuplicate is not fully supported in standard Sequelize bulkCreate for Postgres without specific options
+                    // Since we generate unique IDs on frontend import, simple INSERT is safer and faster.
+                    ignoreDuplicates: true 
+                });
+                processed += chunk.length;
+                console.log(`   ↳ Procesado lote ${i} - ${i + chunk.length}`);
+            }
         });
         
-        console.log("✅ Importación masiva completada exitosamente.");
-        res.json({ success: true, count: data.length, message: "Importación masiva completada." });
+        console.log("✅ Importación completada exitosamente.");
+        res.json({ success: true, count: processed });
     } catch (error) {
-        console.error("❌ Bulk Insert Error:", error);
+        console.error("❌ Error Importación Masiva:", error);
         res.status(500).json({ error: error.message });
     }
 });
 
-// DELETE: Eliminar Doctor
 app.delete('/api/doctors/:id', async (req, res) => {
-    const { id } = req.params;
     try {
-        const result = await Doctor.destroy({ where: { id } });
-        if (result > 0) {
-            res.status(200).json({ success: true, message: "Registro eliminado." });
-        } else {
-            res.status(404).json({ success: false, message: "No encontrado." });
-        }
+        await Doctor.destroy({ where: { id: req.params.id } });
+        res.json({ success: true });
     } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
+        res.status(500).json({ error: error.message });
     }
 });
 
-// DELETE VISIT (Manipulación del JSON Array)
 app.delete('/api/doctors/:doctorId/visits/:visitId', async (req, res) => {
     const { doctorId, visitId } = req.params;
     try {
         const doctor = await Doctor.findByPk(doctorId);
-        if (!doctor) {
-            return res.status(404).json({ success: false, message: "Doctor no encontrado" });
+        if (doctor) {
+            let visits = doctor.visits || [];
+            // Ensure visits is an array
+            if (typeof visits === 'string') visits = JSON.parse(visits);
+            
+            doctor.visits = visits.filter(v => v.id !== visitId);
+            doctor.changed('visits', true);
+            await doctor.save();
+            res.json({ success: true });
+        } else {
+            res.status(404).json({ error: "Doctor not found" });
         }
-
-        // Filtramos el array de visitas en memoria
-        const currentVisits = doctor.visits || [];
-        const updatedVisits = currentVisits.filter(v => v.id !== visitId);
-
-        // Actualizamos y guardamos
-        doctor.visits = updatedVisits;
-        
-        // Importante para Sequelize: avisar que el campo JSON cambió
-        doctor.changed('visits', true); 
-        await doctor.save();
-
-        res.json({ success: true, result: doctor });
     } catch (error) {
-        console.error(error);
-        res.status(500).json({ success: false, error: error.message });
+        res.status(500).json({ error: error.message });
     }
 });
 
-// GET Procedures
 app.get('/api/procedures', async (req, res) => {
     try {
         const procedures = await Procedure.findAll();
@@ -208,37 +202,27 @@ app.get('/api/procedures', async (req, res) => {
     }
 });
 
-// POST Procedure
 app.post('/api/procedures', async (req, res) => {
-    const data = req.body;
     try {
-        await Procedure.upsert(data);
-        const result = await Procedure.findByPk(data.id);
-        res.json(result);
+        await Procedure.upsert(req.body);
+        res.json({ success: true });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
 });
 
-// DELETE Procedure
 app.delete('/api/procedures/:id', async (req, res) => {
-    const { id } = req.params;
     try {
-        const result = await Procedure.destroy({ where: { id } });
-        res.json({ success: true, result });
+        await Procedure.destroy({ where: { id: req.params.id } });
+        res.json({ success: true });
     } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
+        res.status(500).json({ error: error.message });
     }
 });
 
-// --- SERVING STATIC FILES (REACT) ---
+// Static Files
 app.use(express.static(path.join(__dirname, 'dist')));
-
-app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, 'dist', 'index.html'));
-});
+app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'dist', 'index.html')));
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, '0.0.0.0', () => { 
-    console.log(`🚀 Servidor SQL corriendo en puerto ${PORT}`);
-});
+app.listen(PORT, '0.0.0.0', () => console.log(`🚀 Server running on ${PORT}`));

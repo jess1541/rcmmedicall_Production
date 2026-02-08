@@ -17,15 +17,12 @@ const DoctorList: React.FC<DoctorListProps> = ({ doctors, onAddDoctor, onImportD
   const navigate = useNavigate();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [searchTerm, setSearchTerm] = useState('');
-  // CHANGED: Default to 'TODOS' for everyone so they can see the full database initially
   const [selectedExecutive, setSelectedExecutive] = useState('TODOS');
   const [activeTab, setActiveTab] = useState<TabType>('MEDICO');
   
-  // Add Modal State
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [formSubmitted, setFormSubmitted] = useState(false);
   
-  // Generic Form Data
   const [formData, setFormData] = useState<Partial<Doctor>>({
       name: '',
       executive: user.role === 'executive' ? user.name : 'SIN ASIGNAR',
@@ -39,20 +36,16 @@ const DoctorList: React.FC<DoctorListProps> = ({ doctors, onAddDoctor, onImportD
   });
 
   const executives = useMemo(() => {
-    // Normalize derived executives to ensure clean list
-    const execs = new Set(doctors.map(d => d.executive.trim().toUpperCase()));
+    const execs = new Set(doctors.map(d => d.executive ? d.executive.trim().toUpperCase() : 'SIN ASIGNAR'));
     return ['TODOS', ...Array.from(execs).sort()];
   }, [doctors]);
 
   const filteredItems = useMemo(() => {
     return doctors.filter(doc => {
-      // Default category to MEDICO if not present for legacy data
       const category = doc.category || 'MEDICO';
-      
       const matchesSearch = doc.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
                             doc.address.toLowerCase().includes(searchTerm.toLowerCase());
       
-      // Strict comparison for filtering
       const docExec = doc.executive ? doc.executive.trim().toUpperCase() : 'SIN ASIGNAR';
       const matchesExec = selectedExecutive === 'TODOS' || docExec === selectedExecutive;
       const matchesTab = category === activeTab;
@@ -85,7 +78,7 @@ const DoctorList: React.FC<DoctorListProps> = ({ doctors, onAddDoctor, onImportD
     ];
 
     const csvString = csvRows.join('\n');
-    const blob = new Blob([csvString], { type: 'text/csv;charset=utf-8;' });
+    const blob = new Blob(["\uFEFF" + csvString], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.setAttribute('href', url);
@@ -109,7 +102,6 @@ const DoctorList: React.FC<DoctorListProps> = ({ doctors, onAddDoctor, onImportD
           processCSV(text);
       };
       reader.readAsText(file);
-      // Reset input
       e.target.value = '';
   };
 
@@ -123,42 +115,36 @@ const DoctorList: React.FC<DoctorListProps> = ({ doctors, onAddDoctor, onImportD
       const newDoctors: Doctor[] = [];
       const days = ['LUNES', 'MARTES', 'MIÉRCOLES', 'JUEVES', 'VIERNES', 'SÁBADO', 'TODOS LOS DÍAS'];
       
-      // Regular expression to handle CSV splitting with quoted values
       const splitCSV = (str: string) => {
+          // Robust regex to split by comma but ignore commas inside quotes
           const matches = str.match(/(".*?"|[^",\s]+)(?=\s*,|\s*$)/g);
           return matches ? matches.map(m => m.replace(/^"|"$/g, '').trim()) : [];
       };
 
-      // Skip header row (index 0)
       for (let i = 1; i < lines.length; i++) {
           const line = lines[i].trim();
           if (!line) continue;
 
-          // Simple parsing: assuming standard CSV (comma separated, quotes for text with commas)
           let columns = splitCSV(line);
-          
-          if (!columns || columns.length === 0) {
-             columns = line.split(',');
-          }
+          // Fallback if regex fails on simple line
+          if (!columns || columns.length === 0) columns = line.split(',');
 
-          // Mapping based on Export Header order:
-          // 0: Categoria, 1: Nombre, 2: Ejecutivo, 3: Especialidad/Area, 4: Hospital
-          // 5: Dirección, 6: Telefono, 7: Email, 8: Notas
-
-          if (columns.length >= 2) { // Need at least name
-              const category = (columns[0] || 'MEDICO').trim().toUpperCase() as any;
-              const name = (columns[1] || 'SIN NOMBRE').trim().toUpperCase();
+          if (columns.length >= 2) {
+              const categoryRaw = (columns[0] || 'MEDICO').trim().toUpperCase();
+              const validCategories = ['MEDICO', 'ADMINISTRATIVO', 'HOSPITAL'];
+              const category = validCategories.includes(categoryRaw) ? categoryRaw : 'MEDICO';
               
-              // Normalize Executive Name (Critical for visibility)
-              let executive = (columns[2] || 'SIN ASIGNAR').trim().toUpperCase();
-              // Remove accidental special chars
-              executive = executive.replace(/['"]+/g, '');
+              const name = (columns[1] || 'SIN NOMBRE').trim().toUpperCase().replace(/['"]+/g, '');
+              let executive = (columns[2] || 'SIN ASIGNAR').trim().toUpperCase().replace(/['"]+/g, '');
 
               const initialSchedule: ScheduleSlot[] = days.map(day => ({ day, time: '', active: false }));
 
+              // Generate ID that is statistically unique for bulk import
+              const uniqueId = `imp-${Date.now().toString(36)}-${Math.random().toString(36).substr(2, 9)}`;
+
               const newDoc: Doctor = {
-                  id: `imp-${Date.now()}-${Math.floor(Math.random() * 10000)}`, // Added more randomness for bulk
-                  category: ['MEDICO', 'ADMINISTRATIVO', 'HOSPITAL'].includes(category) ? category : 'MEDICO',
+                  id: uniqueId,
+                  category: category as any,
                   name: name,
                   executive: executive,
                   specialty: (columns[3] || '').trim().toUpperCase(),
@@ -178,23 +164,20 @@ const DoctorList: React.FC<DoctorListProps> = ({ doctors, onAddDoctor, onImportD
       }
 
       if (newDoctors.length > 0 && onImportDoctors) {
-          if (window.confirm(`Se encontraron ${newDoctors.length} registros válidos. ¿Desea importarlos a la base de datos?`)) {
+          const confirmMsg = `Se encontraron ${newDoctors.length} registros válidos. \n\n¿Desea importarlos a la base de datos?\n\nNOTA: Esto puede tomar unos segundos. Por favor espere a que termine el proceso.`;
+          if (window.confirm(confirmMsg)) {
               onImportDoctors(newDoctors);
           }
       } else {
-          alert("No se pudieron procesar registros del archivo.");
+          alert("No se pudieron procesar registros del archivo. Verifique el formato CSV.");
       }
   };
 
   const handleDelete = (e: React.MouseEvent, id: string) => {
-      // Detener propagación es CRÍTICO aquí para evitar que se abra la ficha del médico
       e.preventDefault();
       e.stopPropagation();
-      
-      const confirmDelete = window.confirm('¿Está seguro de que desea eliminar este registro permanentemente? Esta acción no se puede deshacer.');
-      
-      if (confirmDelete && onDeleteDoctor) {
-          onDeleteDoctor(id);
+      if (window.confirm('¿Está seguro de eliminar este registro permanentemente?')) {
+          onDeleteDoctor && onDeleteDoctor(id);
       }
   };
 
@@ -249,7 +232,6 @@ const DoctorList: React.FC<DoctorListProps> = ({ doctors, onAddDoctor, onImportD
       
       onAddDoctor(newDoctor);
       resetForm();
-      console.log(`Nuevo ${activeTab.toLowerCase()} registrado exitosamente.`);
   };
 
   return (
@@ -274,7 +256,6 @@ const DoctorList: React.FC<DoctorListProps> = ({ doctors, onAddDoctor, onImportD
             <button 
                 onClick={handleImportClick}
                 className="flex items-center px-4 py-2.5 bg-white border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 transition shadow-sm font-bold text-sm active:scale-95"
-                title="Importar desde CSV"
             >
                 <Upload className="h-4 w-4 mr-2 text-slate-500" />
                 Importar
@@ -297,7 +278,6 @@ const DoctorList: React.FC<DoctorListProps> = ({ doctors, onAddDoctor, onImportD
         </div>
       </div>
 
-      {/* TABS */}
       <div className="flex space-x-1 bg-slate-100 p-1 rounded-2xl w-fit">
           {(['MEDICO', 'ADMINISTRATIVO', 'HOSPITAL'] as TabType[]).map(tab => (
               <button
@@ -330,7 +310,6 @@ const DoctorList: React.FC<DoctorListProps> = ({ doctors, onAddDoctor, onImportD
           <div className="flex-1">
             <label className="block text-xs font-bold text-slate-400 uppercase mb-1.5 ml-1">Ejecutivo</label>
             <div className="relative">
-                {/* CHANGED: Enabled for everyone to allow full database visibility */}
                 <select
                     className="block w-full pl-4 pr-10 py-3 text-sm font-bold border-slate-200 bg-slate-50 text-black rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all appearance-none"
                     value={selectedExecutive}
@@ -340,7 +319,6 @@ const DoctorList: React.FC<DoctorListProps> = ({ doctors, onAddDoctor, onImportD
                     <option key={exec} value={exec}>{exec}</option>
                 ))}
                 </select>
-                
                 <div className="absolute inset-y-0 right-0 flex items-center px-3 pointer-events-none">
                     <Filter className="h-4 w-4 text-slate-400" />
                 </div>
@@ -394,12 +372,6 @@ const DoctorList: React.FC<DoctorListProps> = ({ doctors, onAddDoctor, onImportD
                     <span className="line-clamp-1 uppercase">{item.specialty || item.area || 'N/A'}</span>
                     </div>
                 )}
-                {item.hospital && activeTab === 'ADMINISTRATIVO' && (
-                    <div className="flex items-start text-sm text-slate-500">
-                        <Building2 className="h-4 w-4 mr-2 mt-0.5 flex-shrink-0 text-slate-400" />
-                        <span className="line-clamp-1 uppercase">{item.hospital}</span>
-                    </div>
-                )}
                 <div className="flex items-start text-sm text-slate-500">
                   <MapPin className="h-4 w-4 mr-2 mt-0.5 flex-shrink-0 text-slate-400" />
                   <span className="line-clamp-2 text-xs uppercase">{item.address || 'SIN DIRECCIÓN'}</span>
@@ -424,30 +396,27 @@ const DoctorList: React.FC<DoctorListProps> = ({ doctors, onAddDoctor, onImportD
           </div>
       )}
 
-      {/* Add Modal */}
       {isAddModalOpen && (
           <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
               <div className="bg-white rounded-3xl shadow-2xl w-full max-w-lg overflow-hidden animate-fadeIn scale-100 transform transition-all max-h-[90vh] overflow-y-auto">
                   <div className="p-6 border-b border-slate-100 flex justify-between items-center sticky top-0 bg-white z-10">
-                      <h3 className="text-xl font-black text-slate-800">Registrar Nuevo {activeTab === 'MEDICO' ? 'Médico' : (activeTab === 'ADMINISTRATIVO' ? 'Administrativo' : 'Hospital')}</h3>
+                      <h3 className="text-xl font-black text-slate-800">Registrar Nuevo {activeTab}</h3>
                       <button onClick={resetForm} className="text-slate-400 hover:text-slate-600"><X className="h-6 w-6" /></button>
                   </div>
                   
                   <form onSubmit={handleAddSubmit} className="p-8 space-y-5" noValidate>
-                      {/* Name */}
                       <div>
                           <label className="block text-xs font-bold text-slate-400 uppercase mb-1.5 ml-1">
                               {activeTab === 'HOSPITAL' ? 'Nombre del Hospital' : 'Nombre Completo'} <span className="text-red-500">*</span>
                           </label>
                           <input 
-                              type="text" required spellCheck={true} lang="es"
+                              type="text" required
                               className={`w-full border bg-slate-50 rounded-xl p-3 text-sm text-black focus:ring-2 focus:ring-blue-500 uppercase ${formSubmitted && !formData.name ? 'border-red-500' : 'border-slate-200'}`}
                               value={formData.name}
                               onChange={e => setFormData({...formData, name: e.target.value.toUpperCase()})}
                           />
                       </div>
 
-                      {/* Fields for MEDICO */}
                       {activeTab === 'MEDICO' && (
                           <div className="grid grid-cols-2 gap-5">
                               <div>
@@ -468,23 +437,6 @@ const DoctorList: React.FC<DoctorListProps> = ({ doctors, onAddDoctor, onImportD
                           </div>
                       )}
 
-                      {/* Fields for ADMINISTRATIVO */}
-                      {activeTab === 'ADMINISTRATIVO' && (
-                          <div className="grid grid-cols-2 gap-5">
-                              <div>
-                                  <label className="block text-xs font-bold text-slate-400 uppercase mb-1.5 ml-1">Área / Puesto</label>
-                                  <input type="text" className="w-full border border-slate-200 bg-slate-50 rounded-xl p-3 text-sm text-black uppercase"
-                                      value={formData.area} onChange={e => setFormData({...formData, area: e.target.value.toUpperCase()})} />
-                              </div>
-                              <div>
-                                  <label className="block text-xs font-bold text-slate-400 uppercase mb-1.5 ml-1">Hospital</label>
-                                  <input type="text" className="w-full border border-slate-200 bg-slate-50 rounded-xl p-3 text-sm text-black uppercase"
-                                      value={formData.hospital} onChange={e => setFormData({...formData, hospital: e.target.value.toUpperCase()})} />
-                              </div>
-                          </div>
-                      )}
-
-                      {/* Common Fields */}
                       <div>
                           <label className="block text-xs font-bold text-slate-400 uppercase mb-1.5 ml-1">Dirección</label>
                           <input type="text" className="w-full border border-slate-200 bg-slate-50 rounded-xl p-3 text-sm text-black uppercase"
@@ -497,29 +449,14 @@ const DoctorList: React.FC<DoctorListProps> = ({ doctors, onAddDoctor, onImportD
                               <input type="text" className="w-full border border-slate-200 bg-slate-50 rounded-xl p-3 text-sm text-black"
                                   value={formData.phone} onChange={e => setFormData({...formData, phone: e.target.value})} />
                           </div>
-                          {activeTab !== 'HOSPITAL' && (
-                              <div>
-                                  <label className="block text-xs font-bold text-slate-400 uppercase mb-1.5 ml-1">Correo</label>
-                                  <input type="email" className="w-full border border-slate-200 bg-slate-50 rounded-xl p-3 text-sm text-black"
-                                      value={formData.email} onChange={e => setFormData({...formData, email: e.target.value})} />
-                              </div>
-                          )}
-                      </div>
-
-                      <div>
-                          <label className="block text-xs font-bold text-slate-400 uppercase mb-1.5 ml-1">Notas</label>
-                          <textarea className="w-full border border-slate-200 bg-slate-50 rounded-xl p-3 text-sm text-black uppercase" rows={3}
-                              value={formData.importantNotes} onChange={e => setFormData({...formData, importantNotes: e.target.value.toUpperCase()})} />
-                      </div>
-
-                      <div>
-                          <label className="block text-xs font-bold text-slate-400 uppercase mb-1.5 ml-1">Ejecutivo Asignado</label>
-                          {/* CHANGED: Allowed selection for everyone */}
-                          <select className="w-full border border-slate-200 bg-slate-50 rounded-xl p-3 text-sm text-black"
-                              value={formData.executive} onChange={e => setFormData({...formData, executive: e.target.value})}>
-                              {executives.filter(e => e !== 'TODOS').map(e => <option key={e} value={e}>{e}</option>)}
-                              <option value="SIN ASIGNAR">SIN ASIGNAR</option>
-                          </select>
+                          <div>
+                              <label className="block text-xs font-bold text-slate-400 uppercase mb-1.5 ml-1">Ejecutivo Asignado</label>
+                              <select className="w-full border border-slate-200 bg-slate-50 rounded-xl p-3 text-sm text-black"
+                                  value={formData.executive} onChange={e => setFormData({...formData, executive: e.target.value})}>
+                                  {executives.filter(e => e !== 'TODOS').map(e => <option key={e} value={e}>{e}</option>)}
+                                  <option value="SIN ASIGNAR">SIN ASIGNAR</option>
+                              </select>
+                          </div>
                       </div>
 
                       <div className="pt-6 flex justify-end gap-3 border-t border-slate-100 mt-2">

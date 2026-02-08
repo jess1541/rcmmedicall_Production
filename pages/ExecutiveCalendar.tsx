@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { useLocation } from 'react-router-dom';
 import { Doctor, Visit, User, TimeOffEvent } from '../types';
-import { ChevronLeft, ChevronRight, Plus, Search, Calendar, X, Lock, Clock, Coffee, CheckCircle2, Trash2, Building, User as UserIcon } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Plus, Search, Calendar, X, Lock, Clock, Coffee, CheckCircle2, Trash2, Building, User as UserIcon, CalendarCheck, CalendarDays, Check } from 'lucide-react';
 import DatePicker, { registerLocale } from 'react-datepicker';
 import es from 'date-fns/locale/es';
 
@@ -240,11 +240,23 @@ const ExecutiveCalendar: React.FC<ExecutiveCalendarProps> = ({ doctors, onUpdate
   };
 
   const handleEditAppointment = (docId: string, visit: Visit) => {
+      // If it's a future or current planned visit, open report modal directly
+      const visitDate = parseDateString(visit.date);
+      const today = new Date();
+      today.setHours(0,0,0,0);
+      
+      // If it's a regular Visit (not Appointment/Cita) and it's today or past, encourage Reporting
+      if (visit.outcome !== 'CITA' && visitDate <= today && visit.status !== 'completed') {
+          openReportModal(docId, visit);
+          return;
+      }
+
+      // Otherwise edit the plan
       const doc = doctors.find(d => d.id === docId);
       
       setSelectedDayForPlan(parseDateString(visit.date).getDate());
       setCurrentDate(parseDateString(visit.date));
-      setIsAppointmentMode(true);
+      setIsAppointmentMode(visit.outcome === 'CITA');
       setIsModalOpen(true);
       
       setSelectedDoctorId(docId);
@@ -290,7 +302,7 @@ const ExecutiveCalendar: React.FC<ExecutiveCalendarProps> = ({ doctors, onUpdate
                        date: dateStr,
                        time: appointmentTime, 
                        objective: planObjective.toUpperCase(), 
-                       outcome: 'CITA',
+                       outcome: isAppointmentMode ? 'CITA' : 'PLANEADA',
                        status: 'planned'
                    };
                    return { ...doc, visits: [...doc.visits, updatedVisit] };
@@ -300,7 +312,7 @@ const ExecutiveCalendar: React.FC<ExecutiveCalendarProps> = ({ doctors, onUpdate
 
           onUpdateDoctors(finalDoctors);
           setIsModalOpen(false);
-          alert("Cita reasignada correctamente.");
+          alert(isAppointmentMode ? "Cita reprogramada." : "Visita reprogramada.");
 
       } else {
           // Nuevo Plan
@@ -327,8 +339,8 @@ const ExecutiveCalendar: React.FC<ExecutiveCalendarProps> = ({ doctors, onUpdate
   };
 
   const openReportModal = (docId: string, visit: Visit) => {
-      if ((visit.outcome as string) === 'CITA') return; 
-
+      // Allow reporting CITA if it's past due
+      
       setSelectedVisitToReport({ docId, visit });
       setReportNote(visit.note === 'Visita Planeada' || visit.note === 'CITA PROGRAMADA' ? '' : visit.note);
       
@@ -338,7 +350,7 @@ const ExecutiveCalendar: React.FC<ExecutiveCalendarProps> = ({ doctors, onUpdate
       setReportFollowUp(visit.followUp || '');
       setReportDate(visit.date);
       setReportTime(visit.time || '');
-      setIsEditingPlan(false);
+      setIsEditingPlan(false); // Default to report mode
       setEditObjective(visit.objective || '');
       setNextVisitDate(null);
       setNextVisitTime('09:00'); 
@@ -516,7 +528,7 @@ const ExecutiveCalendar: React.FC<ExecutiveCalendarProps> = ({ doctors, onUpdate
 
       return (
         <div key={i} draggable onDragStart={(e) => handleDragStart(e, evt.data.docId, evt.data.visit)} onDragEnd={handleDragEnd}
-            onClick={(e) => { e.stopPropagation(); if (isTimeOff) setSelectedTimeOff(evt.data); else if (isAppointment) handleEditAppointment(evt.data.docId, evt.data.visit); else openReportModal(evt.data.docId, evt.data.visit); }}
+            onClick={(e) => { e.stopPropagation(); if (isTimeOff) setSelectedTimeOff(evt.data); else handleEditAppointment(evt.data.docId, evt.data.visit); }}
             className={chipClasses}
         >
             {isSlot ? (
@@ -712,7 +724,7 @@ const ExecutiveCalendar: React.FC<ExecutiveCalendarProps> = ({ doctors, onUpdate
                    </div>
                    <div className="p-6 border-t border-slate-100 flex justify-end gap-3 bg-slate-50">
                        <button onClick={() => setReportModalOpen(false)} className="px-4 py-2 text-sm font-bold text-slate-500 hover:bg-slate-200 rounded-xl transition-colors">Cancelar</button>
-                       {isEditingPlan ? (<button onClick={savePlanChanges} className="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-bold shadow-lg transition-all active:scale-95">Guardar Cambios</button>) : (<button onClick={saveReport} className="px-6 py-2 bg-green-600 hover:bg-green-700 text-white rounded-xl text-sm font-bold shadow-lg transition-all active:scale-95">Finalizar Reporte</button>)}
+                       {isEditingPlan ? (<button onClick={savePlanChanges} className="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-bold shadow-lg transition-all active:scale-95">Guardar Cambios</button>) : (<button onClick={saveReport} className="px-6 py-2 bg-green-600 hover:bg-green-700 text-white rounded-xl text-sm font-bold shadow-lg transition-all active:scale-95"><Check className="w-4 h-4 mr-2 inline" />Finalizar Reporte</button>)}
                    </div>
                </div>
            </div>
