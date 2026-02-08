@@ -1,241 +1,219 @@
+
 const express = require('express');
-const { Sequelize, DataTypes } = require('sequelize');
+const mysql = require('mysql2/promise');
 const cors = require('cors');
-const path = require('path');
-const fs = require('fs');
 
 const app = express();
-const PORT = process.env.PORT || 8080;
 
-// 1. Middleware (Must be defined before routes)
+// Middleware
 app.use(express.json({ limit: '50mb' }));
 app.use(cors());
 
-// 2. Inicialización Robusta de Base de Datos
-let sequelize = null;
-let Doctor = null;
-let Procedure = null;
-
-const initializeDatabase = async () => {
-    try {
-        const hasMySQL = process.env.DB_SOCKET_PATH || process.env.DB_HOST || process.env.DATABASE_URL;
-        
-        if (hasMySQL) {
-            console.log("🔌 Conectando a MySQL...");
-            const dbConfig = {
-                dialect: 'mysql',
-                logging: false,
-                define: { charset: 'utf8mb4', collate: 'utf8mb4_unicode_ci', timestamps: true },
-                pool: { max: 20, min: 0, acquire: 60000, idle: 10000 },
-                dialectOptions: { 
-                    decimalNumbers: true,
-                    charset: 'utf8mb4', 
-                    ssl: process.env.DB_SSL === 'true' ? { require: true, rejectUnauthorized: false } : undefined 
-                }
-            };
-            
-            if (process.env.DB_SOCKET_PATH) {
-                console.log(`   > Modo: Unix Socket (${process.env.DB_SOCKET_PATH})`);
-                dbConfig.dialectOptions.socketPath = process.env.DB_SOCKET_PATH;
-                if (process.env.DB_SSL !== 'true') delete dbConfig.dialectOptions.ssl;
-
-                sequelize = new Sequelize(
-                    process.env.DB_NAME, 
-                    process.env.DB_USER, 
-                    process.env.DB_PASS, 
-                    { ...dbConfig, host: 'localhost' }
-                );
-            } else if (process.env.DB_HOST) {
-                console.log(`   > Modo: TCP (${process.env.DB_HOST})`);
-                sequelize = new Sequelize(
-                    process.env.DB_NAME, 
-                    process.env.DB_USER, 
-                    process.env.DB_PASS, 
-                    { ...dbConfig, host: process.env.DB_HOST, port: process.env.DB_PORT || 3306 }
-                );
-            } else {
-                sequelize = new Sequelize(process.env.DATABASE_URL, dbConfig);
-            }
-        } else {
-            console.warn("⚠️ Usando SQLite (Modo Fallback/Demo).");
-            sequelize = new Sequelize({ 
-                dialect: 'sqlite', 
-                storage: './database.sqlite', 
-                logging: false 
-            });
-        }
-
-        // Definición de Modelos
-        Doctor = sequelize.define('Doctor', {
-            id: { type: DataTypes.STRING(255), primaryKey: true, allowNull: false },
-            category: { type: DataTypes.STRING, defaultValue: 'MEDICO' },
-            executive: { type: DataTypes.STRING, defaultValue: 'SIN ASIGNAR' },
-            name: { type: DataTypes.STRING, allowNull: false },
-            specialty: DataTypes.STRING,
-            subSpecialty: DataTypes.STRING,
-            address: DataTypes.TEXT,
-            hospital: DataTypes.STRING,
-            area: DataTypes.STRING,
-            phone: DataTypes.STRING,
-            email: DataTypes.STRING,
-            floor: DataTypes.STRING,
-            officeNumber: DataTypes.STRING,
-            birthDate: DataTypes.STRING,
-            cedula: DataTypes.STRING,
-            profile: DataTypes.TEXT,
-            classification: DataTypes.STRING,
-            socialStyle: DataTypes.STRING,
-            attitudinalSegment: DataTypes.STRING,
-            importantNotes: DataTypes.TEXT,
-            isInsuranceDoctor: { type: DataTypes.BOOLEAN, defaultValue: false },
-            visits: { type: DataTypes.JSON, defaultValue: [] },
-            schedule: { type: DataTypes.JSON, defaultValue: [] }
-        }, { indexes: [{ fields: ['executive'] }, { fields: ['name'] }] });
-
-        Procedure = sequelize.define('Procedure', {
-            id: { type: DataTypes.STRING(255), primaryKey: true, allowNull: false },
-            date: DataTypes.STRING,
-            time: DataTypes.STRING,
-            hospital: DataTypes.STRING,
-            doctorId: DataTypes.STRING,
-            doctorName: DataTypes.STRING,
-            procedureType: DataTypes.STRING,
-            paymentType: DataTypes.STRING,
-            cost: DataTypes.FLOAT,
-            commission: DataTypes.FLOAT,
-            technician: DataTypes.STRING,
-            notes: DataTypes.TEXT,
-            status: DataTypes.STRING
-        }, { indexes: [{ fields: ['date'] }, { fields: ['doctorId'] }] });
-
-        await sequelize.sync({ alter: true });
-        console.log("✅ Base de datos sincronizada correctamente.");
-
-    } catch (error) {
-        console.error("❌ Error CRÍTICO inicializando Base de Datos:", error);
-        sequelize = null; 
-    }
+// Configuración de MySQL (Ajustar con tus credenciales locales)
+const dbConfig = {
+    host: 'localhost',
+    user: 'root',
+    password: 'Medicall2026!', // Cambiar por tu contraseña
+    database: 'rc-medicall-db',
+    port: 3306,
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0
 };
 
-initializeDatabase();
+let pool;
 
-// 3. Middleware de seguridad
-const ensureDB = (req, res, next) => {
-    if (!sequelize || !Doctor || !Procedure) {
-        return res.status(503).json({ error: "Base de datos no disponible. Intente más tarde." });
-    }
-    next();
-};
-
-// 4. Rutas de API
-app.get('/health', (req, res) => res.status(200).send('OK'));
-
-app.get('/api/sync-status', ensureDB, async (req, res) => {
+async function initDB() {
     try {
-        const lastDoctor = await Doctor.findOne({ order: [['updatedAt', 'DESC']], attributes: ['updatedAt'] });
-        const lastProcedure = await Procedure.findOne({ order: [['updatedAt', 'DESC']], attributes: ['updatedAt'] });
-        
-        res.json({
-            doctorsVersion: lastDoctor ? lastDoctor.updatedAt : 0,
-            proceduresVersion: lastProcedure ? lastProcedure.updatedAt : 0
+        // Crear la conexión inicial para asegurar que la DB existe
+        const connection = await mysql.createConnection({
+            host: dbConfig.host,
+            user: dbConfig.user,
+            password: dbConfig.password
         });
+        await connection.query(`CREATE DATABASE IF NOT EXISTS ${dbConfig.database};`);
+        await connection.end();
+
+        // Crear el pool de conexiones
+        pool = mysql.createPool(dbConfig);
+
+        // Tabla de Doctores (con soporte JSON para visits y schedule)
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS doctors (
+                id VARCHAR(100) PRIMARY KEY,
+                category VARCHAR(50) DEFAULT 'MEDICO',
+                executive VARCHAR(100),
+                name VARCHAR(255),
+                specialty VARCHAR(255),
+                subSpecialty VARCHAR(255),
+                address TEXT,
+                hospital VARCHAR(255),
+                area VARCHAR(100),
+                phone VARCHAR(50),
+                email VARCHAR(150),
+                floor VARCHAR(20),
+                officeNumber VARCHAR(20),
+                birthDate VARCHAR(20),
+                cedula VARCHAR(50),
+                classification VARCHAR(5),
+                socialStyle VARCHAR(50),
+                attitudinalSegment VARCHAR(100),
+                importantNotes TEXT,
+                isInsuranceDoctor BOOLEAN DEFAULT FALSE,
+                visits JSON,
+                schedule JSON,
+                updatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+        `);
+
+        // Tabla de Procedimientos
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS procedures (
+                id VARCHAR(100) PRIMARY KEY,
+                date DATE,
+                time VARCHAR(10),
+                hospital VARCHAR(255),
+                doctorId VARCHAR(100),
+                doctorName VARCHAR(255),
+                procedureType VARCHAR(255),
+                paymentType VARCHAR(50),
+                cost DECIMAL(15, 2),
+                commission DECIMAL(15, 2),
+                technician VARCHAR(255),
+                notes TEXT,
+                status VARCHAR(50),
+                updatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                INDEX (doctorId)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+        `);
+
+        console.log("✅ MySQL 8.4 Conectado y Tablas Sincronizadas.");
+    } catch (err) {
+        console.error("❌ Error en MySQL init:", err.message);
+    }
+}
+
+initDB();
+
+// --- API ROUTES ---
+
+// GET: Obtener todos los doctores
+app.get('/api/doctors', async (req, res) => {
+    try {
+        const [rows] = await pool.query("SELECT * FROM doctors");
+        // MySQL devuelve los campos JSON como objetos si el driver está bien configurado, 
+        // pero por seguridad mapeamos
+        const doctors = rows.map(row => ({
+            ...row,
+            isInsuranceDoctor: !!row.isInsuranceDoctor,
+            visits: typeof row.visits === 'string' ? JSON.parse(row.visits) : (row.visits || []),
+            schedule: typeof row.schedule === 'string' ? JSON.parse(row.schedule) : (row.schedule || [])
+        }));
+        res.json(doctors);
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
 });
 
-app.get('/api/doctors', ensureDB, async (req, res) => {
+// POST: Crear o Actualizar Doctor (Upsert)
+app.post('/api/doctors', async (req, res) => {
+    const d = req.body;
     try {
-        const doctors = await Doctor.findAll();
-        res.json(doctors);
-    } catch (error) { res.status(500).json({ error: error.message }); }
-});
+        const query = `
+            INSERT INTO doctors (
+                id, category, executive, name, specialty, subSpecialty, address, 
+                hospital, area, phone, email, floor, officeNumber, birthDate, 
+                cedula, classification, socialStyle, attitudinalSegment, 
+                importantNotes, isInsuranceDoctor, visits, schedule
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+                category=VALUES(category), executive=VALUES(executive), name=VALUES(name),
+                specialty=VALUES(specialty), subSpecialty=VALUES(subSpecialty), address=VALUES(address),
+                hospital=VALUES(hospital), area=VALUES(area), phone=VALUES(phone),
+                email=VALUES(email), floor=VALUES(floor), officeNumber=VALUES(officeNumber),
+                birthDate=VALUES(birthDate), cedula=VALUES(cedula), classification=VALUES(classification),
+                socialStyle=VALUES(socialStyle), attitudinalSegment=VALUES(attitudinalSegment),
+                importantNotes=VALUES(importantNotes), isInsuranceDoctor=VALUES(isInsuranceDoctor),
+                visits=VALUES(visits), schedule=VALUES(schedule)
+        `;
 
-app.post('/api/doctors', ensureDB, async (req, res) => {
-    try {
-        await Doctor.upsert(req.body);
-        const result = await Doctor.findByPk(req.body.id);
-        res.json(result);
-    } catch (error) { res.status(500).json({ error: error.message }); }
-});
+        await pool.execute(query, [
+            d.id, d.category || 'MEDICO', d.executive, d.name, d.specialty, d.subSpecialty, d.address,
+            d.hospital, d.area, d.phone, d.email, d.floor, d.officeNumber, d.birthDate,
+            d.cedula, d.classification, d.socialStyle, d.attitudinalSegment,
+            d.importantNotes, d.isInsuranceDoctor ? 1 : 0,
+            JSON.stringify(d.visits || []), JSON.stringify(d.schedule || [])
+        ]);
 
-app.post('/api/doctors/bulk', ensureDB, async (req, res) => {
-    const data = req.body;
-    if (!Array.isArray(data)) return res.status(400).json({ error: "Data must be an array" });
-    const CHUNK_SIZE = 500; 
-    try {
-        await sequelize.transaction(async (t) => {
-            for (let i = 0; i < data.length; i += CHUNK_SIZE) {
-                const chunk = data.slice(i, i + CHUNK_SIZE);
-                await Doctor.bulkCreate(chunk, {
-                    transaction: t,
-                    validate: true,
-                    updateOnDuplicate: [
-                        'category', 'executive', 'name', 'specialty', 'subSpecialty', 
-                        'address', 'hospital', 'area', 'phone', 'email', 'floor', 
-                        'officeNumber', 'birthDate', 'cedula', 'classification', 
-                        'profile', 'socialStyle', 'attitudinalSegment',
-                        'importantNotes', 'isInsuranceDoctor', 'visits', 'schedule', 'updatedAt'
-                    ]
-                });
-            }
-        });
-        res.json({ success: true });
-    } catch (error) { res.status(500).json({ error: error.message }); }
-});
-
-app.delete('/api/doctors/:id', ensureDB, async (req, res) => {
-    try {
-        await Doctor.destroy({ where: { id: req.params.id } });
-        res.json({ success: true });
-    } catch (error) { res.status(500).json({ error: error.message }); }
-});
-
-app.delete('/api/doctors/:doctorId/visits/:visitId', ensureDB, async (req, res) => {
-    try {
-        const doctor = await Doctor.findByPk(req.params.doctorId);
-        if (doctor) {
-            let visits = doctor.visits || [];
-            if (typeof visits === 'string') {
-                try { visits = JSON.parse(visits); } catch (e) { visits = []; }
-            }
-            const newVisits = visits.filter(v => v.id !== req.params.visitId);
-            
-            await Doctor.update(
-                { visits: newVisits },
-                { where: { id: req.params.doctorId } }
-            );
-            res.json({ success: true });
-        } else { res.status(404).json({ error: "Doctor not found" }); }
-    } catch (error) { res.status(500).json({ error: error.message }); }
-});
-
-app.get('/api/procedures', ensureDB, async (req, res) => {
-    try { const p = await Procedure.findAll(); res.json(p); } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.post('/api/procedures', ensureDB, async (req, res) => {
-    try { await Procedure.upsert(req.body); res.json({ success: true }); } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.delete('/api/procedures/:id', ensureDB, async (req, res) => {
-    try { await Procedure.destroy({ where: { id: req.params.id } }); res.json({ success: true }); } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-// 5. Archivos Estáticos
-app.use(express.static(path.join(__dirname, 'dist')));
-
-app.get('*', (req, res) => {
-    const indexPath = path.join(__dirname, 'dist', 'index.html');
-    if (fs.existsSync(indexPath)) {
-        res.sendFile(indexPath);
-    } else {
-        res.status(200).send(`
-            <h1>CRM Backend Activo</h1>
-            <p>DB Status: ${sequelize ? 'Conectado ✅' : 'Desconectado ❌'}</p>
-        `);
+        res.json({ success: true, id: d.id });
+    } catch (error) {
+        console.error("Error saving doctor:", error);
+        res.status(500).json({ error: error.message });
     }
 });
 
-// 6. Start Server (LAST STEP)
-app.listen(PORT, '0.0.0.0', () => console.log(`🚀 Server running on port ${PORT}`));
+// DELETE: Eliminar Doctor
+app.delete('/api/doctors/:id', async (req, res) => {
+    try {
+        await pool.execute("DELETE FROM doctors WHERE id = ?", [req.params.id]);
+        res.json({ success: true });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// --- PROCEDURES ---
+
+// GET: Todos los procedimientos
+app.get('/api/procedures', async (req, res) => {
+    try {
+        const [rows] = await pool.query("SELECT * FROM procedures");
+        res.json(rows);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// POST: Upsert Procedimiento
+app.post('/api/procedures', async (req, res) => {
+    const p = req.body;
+    try {
+        const query = `
+            INSERT INTO procedures (
+                id, date, time, hospital, doctorId, doctorName, 
+                procedureType, paymentType, cost, commission, technician, notes, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+                date=VALUES(date), time=VALUES(time), hospital=VALUES(hospital),
+                doctorId=VALUES(doctorId), doctorName=VALUES(doctorName),
+                procedureType=VALUES(procedureType), paymentType=VALUES(paymentType),
+                cost=VALUES(cost), commission=VALUES(commission),
+                technician=VALUES(technician), notes=VALUES(notes), status=VALUES(status)
+        `;
+
+        await pool.execute(query, [
+            p.id, p.date, p.time, p.hospital, p.doctorId, p.doctorName,
+            p.procedureType, p.paymentType, p.cost || 0, p.commission || 0,
+            p.technician, p.notes, p.status
+        ]);
+
+        res.json({ success: true, id: p.id });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// DELETE: Eliminar Procedimiento
+app.delete('/api/procedures/:id', async (req, res) => {
+    try {
+        await pool.execute("DELETE FROM procedures WHERE id = ?", [req.params.id]);
+        res.json({ success: true });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+const PORT = 5000;
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`🚀 Servidor MySQL CRM en puerto ${PORT}`);
+});
