@@ -17,11 +17,10 @@ const STORAGE_KEYS = {
     TIMEOFF: 'rc_medicall_timeoff_v5'
 };
 
-// En producción (Cloud Run), el frontend y backend viven en el mismo dominio/puerto.
-// Usamos una ruta relativa vacía para que las peticiones vayan a '/api/...' del mismo origen.
-const API_URL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' 
-    ? 'http://localhost:5000/api' 
-    : '/api';
+// Configuración de API URL
+// En producción (Cloud Run), usamos rutas relativas '/api' para evitar problemas de CORS y puertos.
+// En desarrollo, el proxy de vite.config.ts redirige '/api' a localhost:8080.
+const API_URL = '/api';
 
 const App: React.FC = () => {
   const [user, setUser] = useState<User | null>(null);
@@ -122,7 +121,25 @@ const App: React.FC = () => {
     } catch (e) { console.error("Update failed", e); }
   };
 
-  // Helper for batch imports using BULK endpoint
+  // NEW: Optimized Batch Update for Calendar (Updates existing, doesn't append)
+  const handleBatchUpdate = async (updatedDoctors: Doctor[]) => {
+      // Optimistic Update: Replace only the changed doctors in the state
+      setDoctors(prev => prev.map(d => {
+          const updated = updatedDoctors.find(u => u.id === d.id);
+          return updated || d;
+      }));
+
+      try {
+          // Send only the changed doctors to the bulk endpoint to update DB
+          await fetch(`${API_URL}/doctors/bulk`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(updatedDoctors)
+          });
+      } catch (e) { console.error("Batch update failed", e); }
+  };
+
+  // Helper for batch imports using BULK endpoint (For CSV Import - Adds New)
   const importDoctors = async (newDoctors: Doctor[]) => {
       if (isImportingRef.current) return;
       
@@ -257,7 +274,7 @@ const App: React.FC = () => {
                 <Route path="/" element={<Dashboard doctors={doctors} user={user} procedures={procedures} onImportBackup={importFullBackup} />} />
                 <Route path="/doctors" element={<DoctorList doctors={doctors} onAddDoctor={addDoctor} onImportDoctors={importDoctors} onDeleteDoctor={deleteDoctor} user={user} />} />
                 <Route path="/doctors/:id" element={<DoctorProfile doctors={doctors} onUpdate={updateDoctor} onDeleteVisit={handleDeleteVisit} user={user} />} />
-                <Route path="/calendar" element={<ExecutiveCalendar doctors={doctors} onUpdateDoctors={importDoctors} onDeleteVisit={handleDeleteVisit} user={user} />} />
+                <Route path="/calendar" element={<ExecutiveCalendar doctors={doctors} onUpdateDoctors={handleBatchUpdate} onDeleteVisit={handleDeleteVisit} user={user} />} />
                 <Route path="/procedures" element={<ProceduresManager procedures={procedures} doctors={doctors} onAddProcedure={addProcedure} onUpdateProcedure={updateProcedure} onDeleteProcedure={deleteProcedure} user={user} />} />
                 <Route path="*" element={<Navigate to="/" replace />} />
                 </Routes>

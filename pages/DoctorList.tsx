@@ -78,6 +78,7 @@ const DoctorList: React.FC<DoctorListProps> = ({ doctors, onAddDoctor, onImportD
     ];
 
     const csvString = csvRows.join('\n');
+    // Add BOM for correct Excel UTF-8 reading
     const blob = new Blob(["\uFEFF" + csvString], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -106,7 +107,10 @@ const DoctorList: React.FC<DoctorListProps> = ({ doctors, onAddDoctor, onImportD
   };
 
   const processCSV = (csvText: string) => {
-      const lines = csvText.split('\n');
+      // 1. Remove BOM if present (Fixes first column weird char issue)
+      const cleanText = csvText.replace(/^\uFEFF/, '');
+      const lines = cleanText.split('\n');
+      
       if (lines.length < 2) {
           alert("El archivo parece estar vacío o no tiene el formato correcto.");
           return;

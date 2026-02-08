@@ -12,7 +12,8 @@ export default defineConfig({
   server: {
     proxy: {
       '/api': {
-        target: 'http://localhost:5000',
+        // Apuntar al puerto 8080 para coincidir con server.js
+        target: 'http://localhost:8080',
         changeOrigin: true,
       }
     }

@@ -7,11 +7,10 @@ const fs = require('fs');
 const app = express();
 const PORT = process.env.PORT || 8080;
 
-// 1. Iniciar servidor INMEDIATAMENTE para satisfacer el Health Check de Cloud Run
-// Esto evita el error "Container failed to start" si la DB tarda en conectar.
+// 1. Iniciar servidor INMEDIATAMENTE
 app.listen(PORT, '0.0.0.0', () => console.log(`🚀 Server running on port ${PORT}`));
 
-// 2. Health Check explícito
+// 2. Health Check
 app.get('/health', (req, res) => res.status(200).send('OK'));
 
 // 3. Middleware
@@ -25,7 +24,6 @@ let Procedure = null;
 
 const initializeDatabase = async () => {
     try {
-        // Se agrega verificación de DB_SOCKET_PATH
         const hasMySQL = process.env.DB_SOCKET_PATH || process.env.DB_HOST || process.env.DATABASE_URL;
         
         if (hasMySQL) {
@@ -36,26 +34,24 @@ const initializeDatabase = async () => {
                 define: { charset: 'utf8mb4', collate: 'utf8mb4_unicode_ci', timestamps: true },
                 pool: { max: 20, min: 0, acquire: 60000, idle: 10000 },
                 dialectOptions: { 
-                    decimalNumbers: true, 
+                    decimalNumbers: true,
+                    charset: 'utf8mb4', 
                     ssl: process.env.DB_SSL === 'true' ? { require: true, rejectUnauthorized: false } : undefined 
                 }
             };
             
             if (process.env.DB_SOCKET_PATH) {
-                // Conexión vía Unix Socket (Recomendado para Cloud Run -> Cloud SQL)
                 console.log(`   > Modo: Unix Socket (${process.env.DB_SOCKET_PATH})`);
                 dbConfig.dialectOptions.socketPath = process.env.DB_SOCKET_PATH;
-                // Generalmente no se requiere configuración SSL explícita al usar el socket de Cloud SQL
                 if (process.env.DB_SSL !== 'true') delete dbConfig.dialectOptions.ssl;
 
                 sequelize = new Sequelize(
                     process.env.DB_NAME, 
                     process.env.DB_USER, 
                     process.env.DB_PASS, 
-                    { ...dbConfig, host: 'localhost' } // Host es ignorado cuando se usa socketPath
+                    { ...dbConfig, host: 'localhost' }
                 );
             } else if (process.env.DB_HOST) {
-                // Conexión TCP Estándar
                 console.log(`   > Modo: TCP (${process.env.DB_HOST})`);
                 sequelize = new Sequelize(
                     process.env.DB_NAME, 
@@ -64,13 +60,10 @@ const initializeDatabase = async () => {
                     { ...dbConfig, host: process.env.DB_HOST, port: process.env.DB_PORT || 3306 }
                 );
             } else {
-                // Cadena de conexión directa
                 sequelize = new Sequelize(process.env.DATABASE_URL, dbConfig);
             }
         } else {
-            console.warn("⚠️ No se detectó MySQL (DB_SOCKET_PATH, DB_HOST o DATABASE_URL).");
             console.warn("⚠️ Usando SQLite (Modo Fallback/Demo).");
-            console.warn("   Nota: Los datos en SQLite son temporales en Cloud Run.");
             sequelize = new Sequelize({ 
                 dialect: 'sqlite', 
                 storage: './database.sqlite', 
@@ -126,19 +119,16 @@ const initializeDatabase = async () => {
 
     } catch (error) {
         console.error("❌ Error CRÍTICO inicializando Base de Datos:", error);
-        // IMPORTANTE: No hacemos process.exit(1) para que el servidor siga vivo 
-        // y se pueda diagnosticar el error leyendo los logs, o servir el frontend estático.
         sequelize = null; 
     }
 };
 
-// Iniciar conexión DB en segundo plano
 initializeDatabase();
 
-// 5. Middleware de seguridad para endpoints
+// 5. Middleware de seguridad
 const ensureDB = (req, res, next) => {
     if (!sequelize || !Doctor || !Procedure) {
-        return res.status(503).json({ error: "El sistema está inicializando la base de datos o hubo un error de conexión. Intente en unos segundos." });
+        return res.status(503).json({ error: "Base de datos no disponible. Intente más tarde." });
     }
     next();
 };
@@ -162,7 +152,7 @@ app.post('/api/doctors', ensureDB, async (req, res) => {
 app.post('/api/doctors/bulk', ensureDB, async (req, res) => {
     const data = req.body;
     if (!Array.isArray(data)) return res.status(400).json({ error: "Data must be an array" });
-    const CHUNK_SIZE = 1000; 
+    const CHUNK_SIZE = 500; // Reducido para mejor manejo de memoria en Cloud Run
     try {
         await sequelize.transaction(async (t) => {
             for (let i = 0; i < data.length; i += CHUNK_SIZE) {
@@ -170,11 +160,13 @@ app.post('/api/doctors/bulk', ensureDB, async (req, res) => {
                 await Doctor.bulkCreate(chunk, {
                     transaction: t,
                     validate: true,
+                    // FIX: Se agregan 'visits' y 'schedule' para que la actualización masiva no ignore estos campos
                     updateOnDuplicate: [
                         'category', 'executive', 'name', 'specialty', 'subSpecialty', 
                         'address', 'hospital', 'area', 'phone', 'email', 'floor', 
                         'officeNumber', 'birthDate', 'cedula', 'classification', 
-                        'importantNotes', 'isInsuranceDoctor', 'updatedAt'
+                        'profile', 'socialStyle', 'attitudinalSegment',
+                        'importantNotes', 'isInsuranceDoctor', 'visits', 'schedule', 'updatedAt'
                     ]
                 });
             }
@@ -195,10 +187,17 @@ app.delete('/api/doctors/:doctorId/visits/:visitId', ensureDB, async (req, res) 
         const doctor = await Doctor.findByPk(req.params.doctorId);
         if (doctor) {
             let visits = doctor.visits || [];
-            if (typeof visits === 'string') visits = JSON.parse(visits);
-            doctor.visits = visits.filter(v => v.id !== req.params.visitId);
-            doctor.changed('visits', true);
-            await doctor.save();
+            // Parseo seguro por si la BD devolvió string (común en SQLite/algunas versiones de MySQL)
+            if (typeof visits === 'string') {
+                try { visits = JSON.parse(visits); } catch (e) { visits = []; }
+            }
+            const newVisits = visits.filter(v => v.id !== req.params.visitId);
+            
+            // Forzamos actualización explícita
+            await Doctor.update(
+                { visits: newVisits },
+                { where: { id: req.params.doctorId } }
+            );
             res.json({ success: true });
         } else { res.status(404).json({ error: "Doctor not found" }); }
     } catch (error) { res.status(500).json({ error: error.message }); }
@@ -216,7 +215,7 @@ app.delete('/api/procedures/:id', ensureDB, async (req, res) => {
     try { await Procedure.destroy({ where: { id: req.params.id } }); res.json({ success: true }); } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// 7. Archivos Estáticos (Frontend)
+// 7. Archivos Estáticos
 app.use(express.static(path.join(__dirname, 'dist')));
 
 app.get('*', (req, res) => {
@@ -225,9 +224,8 @@ app.get('*', (req, res) => {
         res.sendFile(indexPath);
     } else {
         res.status(200).send(`
-            <h1>Iniciando Sistema CRM...</h1>
-            <p>Si ve esto, el servidor backend está activo pero el frontend no se ha compilado o copiado a 'dist'.</p>
-            <p>Estado de DB: ${sequelize ? 'Conectada ✅' : 'Inicializando o Fallida ⏳'}</p>
+            <h1>CRM Backend Activo</h1>
+            <p>DB Status: ${sequelize ? 'Conectado ✅' : 'Desconectado ❌'}</p>
         `);
     }
 });
