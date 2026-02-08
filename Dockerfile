@@ -29,6 +29,6 @@ COPY --from=builder /app/dist ./dist
 
 # Exponer el puerto
 EXPOSE 8080
-
+COPY --from=builder /app/server.js ./server.js
 # Comando para iniciar la aplicación
 CMD ["npm", "start"]
