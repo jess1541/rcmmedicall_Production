@@ -5,7 +5,7 @@ const path = require('path');
 
 const app = express();
 
-// Middleware - Increased limit for bulk imports
+// Middleware - Increased limit for bulk imports (50mb is usually enough for ~50k rows)
 app.use(express.json({ limit: '50mb' })); 
 app.use(cors());
 
@@ -92,9 +92,10 @@ const Procedure = sequelize.define('Procedure', {
     status: DataTypes.STRING
 });
 
-// Sincronizar base de datos (Crea tablas si no existen)
-sequelize.sync()
-    .then(() => console.log(isProduction ? "✅ PostgreSQL Conectado" : "✅ SQLite Local Conectado"))
+// Sincronizar base de datos
+// 'alter: true' es CRÍTICO: actualiza las tablas si añades columnas nuevas sin borrar datos.
+sequelize.sync({ alter: true })
+    .then(() => console.log(isProduction ? "✅ PostgreSQL Conectado (Schema Synced)" : "✅ SQLite Local Conectado (Schema Synced)"))
     .catch(err => console.error("❌ Error de Base de Datos:", err));
 
 // --- API Routes ---
@@ -105,6 +106,7 @@ app.get('/api/doctors', async (req, res) => {
         const doctors = await Doctor.findAll();
         res.json(doctors);
     } catch (error) {
+        console.error("Error fetching doctors:", error);
         res.status(500).json({ error: error.message });
     }
 });
@@ -118,7 +120,7 @@ app.post('/api/doctors', async (req, res) => {
         const result = await Doctor.findByPk(data.id);
         res.json(result);
     } catch (error) {
-        console.error(error);
+        console.error("Error saving doctor:", error);
         res.status(500).json({ error: error.message });
     }
 });
@@ -129,17 +131,27 @@ app.post('/api/doctors/bulk', async (req, res) => {
     if (!Array.isArray(data)) {
         return res.status(400).json({ error: "Se esperaba un arreglo de datos." });
     }
+    
+    console.log(`📥 Recibiendo solicitud masiva para ${data.length} registros...`);
+
     try {
-        // updateOnDuplicate asegura que si el ID ya existe, se actualicen los campos
-        await Doctor.bulkCreate(data, {
-            updateOnDuplicate: [
-                'category', 'executive', 'name', 'specialty', 'hospital', 
-                'address', 'phone', 'email', 'importantNotes', 'updatedAt'
-            ]
+        // Transaction asegura que o se guardan todos o ninguno
+        await sequelize.transaction(async (t) => {
+            // Usamos bulkCreate con updateOnDuplicate para manejar inserts y updates eficientemente
+            await Doctor.bulkCreate(data, {
+                updateOnDuplicate: [
+                    'category', 'executive', 'name', 'specialty', 'subSpecialty', 
+                    'address', 'hospital', 'area', 'phone', 'email', 'floor', 
+                    'officeNumber', 'importantNotes', 'updatedAt'
+                ],
+                transaction: t
+            });
         });
+        
+        console.log("✅ Importación masiva completada exitosamente.");
         res.json({ success: true, count: data.length, message: "Importación masiva completada." });
     } catch (error) {
-        console.error("Bulk Insert Error:", error);
+        console.error("❌ Bulk Insert Error:", error);
         res.status(500).json({ error: error.message });
     }
 });

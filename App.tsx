@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { HashRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import Sidebar from './components/Sidebar';
 import Dashboard from './pages/Dashboard';
@@ -34,6 +34,8 @@ const App: React.FC = () => {
       return savedState === 'true';
   });
   const [isSyncing, setIsSyncing] = useState(false);
+  // Use a ref to track if an import is happening to prevent race conditions with polling
+  const isImportingRef = useRef(false);
 
   const toggleSidebar = () => {
       const newState = !isSidebarCollapsed;
@@ -42,10 +44,10 @@ const App: React.FC = () => {
   };
 
   const fetchData = async () => {
+      // Don't poll if we are in the middle of a heavy import operation
+      if (isImportingRef.current) return;
+
       try {
-          // If server is not running, these will fail. 
-          // For local development without server, fallback to old behavior or empty state would be needed, 
-          // but user requested real-time which mandates server.
           const [docsRes, procsRes] = await Promise.all([
               fetch(`${API_URL}/doctors`),
               fetch(`${API_URL}/procedures`)
@@ -74,12 +76,15 @@ const App: React.FC = () => {
 
     // Polling interval for "Real Time" updates (every 5 seconds)
     const interval = setInterval(() => {
-        setIsSyncing(true);
-        fetchData(); 
+        // Only trigger sync indicator if we are actually going to fetch
+        if (!isImportingRef.current && user) {
+            setIsSyncing(true);
+            fetchData(); 
+        }
     }, 5000);
 
     return () => clearInterval(interval);
-  }, []);
+  }, [user]);
 
   const handleLogin = (loggedInUser: User) => {
       setUser(loggedInUser);
@@ -102,7 +107,7 @@ const App: React.FC = () => {
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify(newDoctor)
           });
-          fetchData(); // Refresh to ensure sync
+          // Do not fetch immediately, let the poll handle it to avoid flickering
       } catch (e) { console.error("Save failed", e); }
   };
 
@@ -119,8 +124,15 @@ const App: React.FC = () => {
 
   // Helper for batch imports using BULK endpoint
   const importDoctors = async (newDoctors: Doctor[]) => {
-      setDoctors(prev => [...newDoctors, ...prev]); // Optimistic
+      if (isImportingRef.current) return;
+      
+      // 1. Lock polling
+      isImportingRef.current = true;
       setIsSyncing(true);
+      
+      // 2. Optimistic UI update (shows data immediately)
+      const prevDoctors = [...doctors]; // Backup in case of failure
+      setDoctors(prev => [...newDoctors, ...prev]); 
       
       try {
           const response = await fetch(`${API_URL}/doctors/bulk`, {
@@ -131,12 +143,16 @@ const App: React.FC = () => {
           
           if (!response.ok) throw new Error("Bulk import failed");
           
-          alert("Importación exitosa. Los datos se han guardado en la base de datos.");
+          alert("Importación exitosa. Los datos se han guardado permanentemente en la base de datos.");
       } catch (e) { 
           console.error("Import failed", e); 
-          alert("Hubo un error guardando los datos en el servidor. Intente nuevamente.");
+          alert("Error CRÍTICO: No se pudieron guardar los datos en el servidor. Revise su conexión.");
+          // Revert optimistic update on failure to prevent data inconsistency
+          setDoctors(prevDoctors);
       } finally {
-          fetchData(); // Sync with DB
+          // 3. Unlock polling and sync one last time to ensure DB ID consistency
+          isImportingRef.current = false;
+          fetchData(); 
       }
   };
 
