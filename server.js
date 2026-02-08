@@ -1,122 +1,136 @@
 const express = require('express');
-const mongoose = require('mongoose');
+const { Sequelize, DataTypes } = require('sequelize');
 const cors = require('cors');
+const path = require('path');
 
 const app = express();
 
 // Middleware
-app.use(express.json({ limit: '50mb' })); // Increased limit for large data syncs
+app.use(express.json({ limit: '50mb' })); 
 app.use(cors());
 
-// --- Database Connection ---
-// REQUISITO: Tener MongoDB corriendo localmente o usar una URL de MongoDB Atlas
-const MONGO_URI = 'mongodb://localhost:27017/crm_medicall'; 
+// --- Database Connection (Sequelize) ---
+// Si existe DATABASE_URL, usa Postgres (Producción). Si no, usa SQLite local.
+const isProduction = !!process.env.DATABASE_URL;
 
-mongoose.connect(MONGO_URI)
-  .then(() => console.log("✅ MongoDB Conectado: Base de datos lista para sincronizar."))
-  .catch(err => console.error("❌ Error conectando a MongoDB:", err));
+const sequelize = isProduction
+    ? new Sequelize(process.env.DATABASE_URL, {
+        dialect: 'postgres',
+        logging: false,
+        dialectOptions: {
+            ssl: {
+                require: true,
+                rejectUnauthorized: false 
+            }
+        }
+      })
+    : new Sequelize({
+        dialect: 'sqlite',
+        storage: './database.sqlite', // Archivo local
+        logging: false
+      });
 
-// --- Schemas & Models ---
+// --- Models Definition ---
 
-// Flexible Schema definitions to match TypeScript interfaces
-const visitSchema = new mongoose.Schema({
-    id: String,
-    date: String,
-    time: String,
-    note: String,
-    objective: String,
-    followUp: String,
-    outcome: String,
-    status: String
-}, { _id: false }); // Disable auto _id for subdocuments to keep original IDs
+// Usamos columnas JSON para 'visits' y 'schedule' para mantener compatibilidad 
+// total con el Frontend sin tener que reescribir toda la lógica relacional.
 
-const scheduleSchema = new mongoose.Schema({
-    day: String,
-    time: String,
-    active: Boolean
-}, { _id: false });
-
-const doctorSchema = new mongoose.Schema({
-    id: { type: String, unique: true, required: true },
-    category: { type: String, default: 'MEDICO' }, // MEDICO, ADMINISTRATIVO, HOSPITAL
-    executive: String,
-    name: String,
-    specialty: String,
-    subSpecialty: String,
-    address: String,
-    hospital: String,
-    area: String,
-    phone: String,
-    email: String,
-    floor: String,
-    officeNumber: String,
-    birthDate: String,
-    cedula: String,
-    profile: String,
-    classification: String,
-    socialStyle: String,
-    attitudinalSegment: String,
-    importantNotes: String,
-    isInsuranceDoctor: Boolean,
-    visits: [visitSchema],
-    schedule: [scheduleSchema]
-}, { minimize: false, strict: false }); // strict: false allows saving fields not explicitly defined if needed
-
-const procedureSchema = new mongoose.Schema({
-    id: { type: String, unique: true, required: true },
-    date: String,
-    time: String,
-    hospital: String,
-    doctorId: String,
-    doctorName: String,
-    procedureType: String,
-    paymentType: String,
-    cost: Number,
-    commission: Number,
-    technician: String,
-    notes: String,
-    status: String
+const Doctor = sequelize.define('Doctor', {
+    id: {
+        type: DataTypes.STRING,
+        primaryKey: true,
+        allowNull: false
+    },
+    category: { type: DataTypes.STRING, defaultValue: 'MEDICO' },
+    executive: DataTypes.STRING,
+    name: DataTypes.STRING,
+    specialty: DataTypes.STRING,
+    subSpecialty: DataTypes.STRING,
+    address: DataTypes.TEXT,
+    hospital: DataTypes.STRING,
+    area: DataTypes.STRING,
+    phone: DataTypes.STRING,
+    email: DataTypes.STRING,
+    floor: DataTypes.STRING,
+    officeNumber: DataTypes.STRING,
+    birthDate: DataTypes.STRING,
+    cedula: DataTypes.STRING,
+    profile: DataTypes.TEXT, // Descripción larga
+    classification: DataTypes.STRING,
+    socialStyle: DataTypes.STRING,
+    attitudinalSegment: DataTypes.STRING,
+    importantNotes: DataTypes.TEXT,
+    isInsuranceDoctor: { type: DataTypes.BOOLEAN, defaultValue: false },
+    // Guardamos las visitas y horario como JSON para imitar la estructura NoSQL
+    visits: { 
+        type: DataTypes.JSON, 
+        defaultValue: [] 
+    },
+    schedule: { 
+        type: DataTypes.JSON, 
+        defaultValue: [] 
+    }
 });
 
-const Doctor = mongoose.model('Doctor', doctorSchema);
-const Procedure = mongoose.model('Procedure', procedureSchema);
+const Procedure = sequelize.define('Procedure', {
+    id: {
+        type: DataTypes.STRING,
+        primaryKey: true,
+        allowNull: false
+    },
+    date: DataTypes.STRING,
+    time: DataTypes.STRING,
+    hospital: DataTypes.STRING,
+    doctorId: DataTypes.STRING,
+    doctorName: DataTypes.STRING,
+    procedureType: DataTypes.STRING,
+    paymentType: DataTypes.STRING,
+    cost: DataTypes.FLOAT,
+    commission: DataTypes.FLOAT,
+    technician: DataTypes.STRING,
+    notes: DataTypes.TEXT,
+    status: DataTypes.STRING
+});
+
+// Sincronizar base de datos (Crea tablas si no existen)
+sequelize.sync()
+    .then(() => console.log(isProduction ? "✅ PostgreSQL Conectado" : "✅ SQLite Local Conectado"))
+    .catch(err => console.error("❌ Error de Base de Datos:", err));
 
 // --- API Routes ---
 
-// --- DOCTORS / HOSPITALS / ADMINS ---
-
-// GET: Obtener todos los registros
+// GET: Obtener todos los doctores
 app.get('/api/doctors', async (req, res) => {
     try {
-        const doctors = await Doctor.find();
+        const doctors = await Doctor.findAll();
         res.json(doctors);
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
 });
 
-// POST: Crear o Actualizar (Upsert) - Guarda automáticamente cambios desde cualquier dispositivo
+// POST: Crear o Actualizar Doctor
 app.post('/api/doctors', async (req, res) => {
     const data = req.body;
     try {
-        // findOneAndUpdate with upsert: true handles both creation and updates
-        const result = await Doctor.findOneAndUpdate(
-            { id: data.id },
-            data,
-            { upsert: true, new: true, setDefaultsOnInsert: true }
-        );
+        // Upsert en Sequelize
+        const [doctor, created] = await Doctor.upsert(data);
+        // Si es SQLite, upsert retorna boolean en created, si es Postgres retorna el objeto.
+        // Buscamos el objeto fresco para devolverlo consistentemente.
+        const result = await Doctor.findByPk(data.id);
         res.json(result);
     } catch (error) {
+        console.error(error);
         res.status(500).json({ error: error.message });
     }
 });
 
-// DELETE: Eliminar un registro
+// DELETE: Eliminar Doctor
 app.delete('/api/doctors/:id', async (req, res) => {
     const { id } = req.params;
     try {
-        const result = await Doctor.deleteOne({ id: id });
-        if (result.deletedCount > 0) {
+        const result = await Doctor.destroy({ where: { id } });
+        if (result > 0) {
             res.status(200).json({ success: true, message: "Registro eliminado." });
         } else {
             res.status(404).json({ success: false, message: "No encontrado." });
@@ -126,61 +140,74 @@ app.delete('/api/doctors/:id', async (req, res) => {
     }
 });
 
-// DELETE VISIT: Eliminar una visita específica dentro de un doctor
+// DELETE VISIT (Manipulación del JSON Array)
 app.delete('/api/doctors/:doctorId/visits/:visitId', async (req, res) => {
     const { doctorId, visitId } = req.params;
     try {
-        const result = await Doctor.updateOne(
-            { id: doctorId }, 
-            { $pull: { visits: { id: visitId } } }
-        );
-        res.json({ success: true, result });
+        const doctor = await Doctor.findByPk(doctorId);
+        if (!doctor) {
+            return res.status(404).json({ success: false, message: "Doctor no encontrado" });
+        }
+
+        // Filtramos el array de visitas en memoria
+        const currentVisits = doctor.visits || [];
+        const updatedVisits = currentVisits.filter(v => v.id !== visitId);
+
+        // Actualizamos y guardamos
+        doctor.visits = updatedVisits;
+        
+        // Importante para Sequelize: avisar que el campo JSON cambió
+        doctor.changed('visits', true); 
+        await doctor.save();
+
+        res.json({ success: true, result: doctor });
     } catch (error) {
+        console.error(error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
 
-// --- PROCEDURES ---
-
-// GET: Obtener todos los procedimientos
+// GET Procedures
 app.get('/api/procedures', async (req, res) => {
     try {
-        const procedures = await Procedure.find();
+        const procedures = await Procedure.findAll();
         res.json(procedures);
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
 });
 
-// POST: Crear o Actualizar Procedimiento
+// POST Procedure
 app.post('/api/procedures', async (req, res) => {
     const data = req.body;
     try {
-        const result = await Procedure.findOneAndUpdate(
-            { id: data.id },
-            data,
-            { upsert: true, new: true, setDefaultsOnInsert: true }
-        );
+        await Procedure.upsert(data);
+        const result = await Procedure.findByPk(data.id);
         res.json(result);
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
 });
 
-// DELETE: Eliminar Procedimiento
+// DELETE Procedure
 app.delete('/api/procedures/:id', async (req, res) => {
     const { id } = req.params;
     try {
-        const result = await Procedure.deleteOne({ id: id });
+        const result = await Procedure.destroy({ where: { id } });
         res.json({ success: true, result });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
 });
 
-// Port configuration
+// --- SERVING STATIC FILES (REACT) ---
+app.use(express.static(path.join(__dirname, 'dist')));
+
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, 'dist', 'index.html'));
+});
+
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, '0.0.0.0', () => { // Listen on 0.0.0.0 to accept connections from other devices in LAN
-    console.log(`🚀 Servidor API corriendo en puerto ${PORT}`);
-    console.log(`📱 Para acceder desde celular, usa la IP de tu PC: http://TU_IP:${PORT}`);
+app.listen(PORT, '0.0.0.0', () => { 
+    console.log(`🚀 Servidor SQL corriendo en puerto ${PORT}`);
 });

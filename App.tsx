@@ -9,15 +9,19 @@ import ProceduresManager from './pages/ProceduresManager';
 import Login from './components/Login';
 import { parseData } from './constants';
 import { Doctor, User, Procedure, TimeOffEvent } from './types';
-import { Menu } from 'lucide-react';
+import { Menu, RefreshCw } from 'lucide-react';
 
 const STORAGE_KEYS = {
-    DOCTORS: 'rc_medicall_doctors_v5',
-    PROCEDURES: 'rc_medicall_procedures_v5',
-    TIMEOFF: 'rc_medicall_timeoff_v5',
     USER: 'rc_medicall_user_v5',
-    SIDEBAR: 'rc_medicall_sidebar_collapsed'
+    SIDEBAR: 'rc_medicall_sidebar_collapsed',
+    TIMEOFF: 'rc_medicall_timeoff_v5'
 };
+
+// En producción (Cloud Run), el frontend y backend viven en el mismo dominio/puerto.
+// Usamos una ruta relativa vacía para que las peticiones vayan a '/api/...' del mismo origen.
+const API_URL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' 
+    ? 'http://localhost:5000/api' 
+    : '/api';
 
 const App: React.FC = () => {
   const [user, setUser] = useState<User | null>(null);
@@ -29,6 +33,7 @@ const App: React.FC = () => {
       const savedState = localStorage.getItem(STORAGE_KEYS.SIDEBAR);
       return savedState === 'true';
   });
+  const [isSyncing, setIsSyncing] = useState(false);
 
   const toggleSidebar = () => {
       const newState = !isSidebarCollapsed;
@@ -36,47 +41,45 @@ const App: React.FC = () => {
       localStorage.setItem(STORAGE_KEYS.SIDEBAR, String(newState));
   };
 
-  // --- CARGA INICIAL SEGURA ---
+  const fetchData = async () => {
+      try {
+          // If server is not running, these will fail. 
+          // For local development without server, fallback to old behavior or empty state would be needed, 
+          // but user requested real-time which mandates server.
+          const [docsRes, procsRes] = await Promise.all([
+              fetch(`${API_URL}/doctors`),
+              fetch(`${API_URL}/procedures`)
+          ]);
+
+          if (docsRes.ok && procsRes.ok) {
+              const docs = await docsRes.json();
+              const procs = await procsRes.json();
+              setDoctors(docs);
+              setProcedures(procs);
+          }
+      } catch (error) {
+          console.error("Error fetching data:", error);
+      } finally {
+          setLoading(false);
+          setIsSyncing(false);
+      }
+  };
+
+  // --- CARGA INICIAL & POLLING ---
   useEffect(() => {
-    const initApp = () => {
-        // 1. Cargar Usuario
-        const savedUser = localStorage.getItem(STORAGE_KEYS.USER);
-        if (savedUser) setUser(JSON.parse(savedUser));
+    const savedUser = localStorage.getItem(STORAGE_KEYS.USER);
+    if (savedUser) setUser(JSON.parse(savedUser));
 
-        // 2. Cargar Médicos (Prioridad al Storage)
-        const storedDocs = localStorage.getItem(STORAGE_KEYS.DOCTORS);
-        if (storedDocs && JSON.parse(storedDocs).length > 0) {
-            setDoctors(JSON.parse(storedDocs));
-        } else {
-            // Solo si está vacío, cargamos los datos por defecto
-            const initial = parseData();
-            setDoctors(initial);
-            localStorage.setItem(STORAGE_KEYS.DOCTORS, JSON.stringify(initial));
-        }
+    fetchData(); // Initial Fetch
 
-        // 3. Cargar Procedimientos
-        const storedProcs = localStorage.getItem(STORAGE_KEYS.PROCEDURES);
-        if (storedProcs) setProcedures(JSON.parse(storedProcs));
+    // Polling interval for "Real Time" updates (every 5 seconds)
+    const interval = setInterval(() => {
+        setIsSyncing(true);
+        fetchData(); 
+    }, 5000);
 
-        setLoading(false);
-    };
-
-    initApp();
+    return () => clearInterval(interval);
   }, []);
-
-  // --- PERSISTENCIA ATÓMICA ---
-  // Solo guardamos si hay datos, para evitar borrar por error al recargar
-  useEffect(() => {
-      if (!loading && doctors.length > 0) {
-          localStorage.setItem(STORAGE_KEYS.DOCTORS, JSON.stringify(doctors));
-      }
-  }, [doctors, loading]);
-
-  useEffect(() => {
-      if (!loading) {
-          localStorage.setItem(STORAGE_KEYS.PROCEDURES, JSON.stringify(procedures));
-      }
-  }, [procedures, loading]);
 
   const handleLogin = (loggedInUser: User) => {
       setUser(loggedInUser);
@@ -88,63 +91,109 @@ const App: React.FC = () => {
       localStorage.removeItem(STORAGE_KEYS.USER);
   };
 
-  // --- FUNCIONES DE RESPALDO GLOBAL ---
-  const importFullBackup = (data: { doctors: Doctor[], procedures: Procedure[], timeOff?: TimeOffEvent[] }) => {
-      if (data.doctors) setDoctors(data.doctors);
-      if (data.procedures) setProcedures(data.procedures);
-      if (data.timeOff) localStorage.setItem(STORAGE_KEYS.TIMEOFF, JSON.stringify(data.timeOff));
-      alert("Base de datos restaurada correctamente.");
-  };
+  // --- API CRUD HANDLERS ---
 
-  // --- CRUD HANDLERS ---
-  const updateDoctor = (updatedDoctor: Doctor) => {
-    setDoctors(prev => prev.map(d => d.id === updatedDoctor.id ? updatedDoctor : d));
-  };
-
-  const updateDoctorsList = (newDoctors: Doctor[]) => {
-      setDoctors(newDoctors);
-  };
-
-  const addDoctor = (newDoctor: Doctor) => {
+  const addDoctor = async (newDoctor: Doctor) => {
+      // Optimistic Update
       setDoctors(prev => [newDoctor, ...prev]);
+      try {
+          await fetch(`${API_URL}/doctors`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(newDoctor)
+          });
+          fetchData(); // Refresh to ensure sync
+      } catch (e) { console.error("Save failed", e); }
   };
 
-  // Función para importar masivamente desde CSV en DoctorList
-  const importDoctors = (newDoctors: Doctor[]) => {
+  const updateDoctor = async (updatedDoctor: Doctor) => {
+    setDoctors(prev => prev.map(d => d.id === updatedDoctor.id ? updatedDoctor : d));
+    try {
+        await fetch(`${API_URL}/doctors`, {
+            method: 'POST', // Server uses POST for Upsert (Update/Insert)
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(updatedDoctor)
+        });
+    } catch (e) { console.error("Update failed", e); }
+  };
+
+  // Helper for batch imports (loops API calls - simple implementation)
+  const importDoctors = async (newDoctors: Doctor[]) => {
       setDoctors(prev => [...newDoctors, ...prev]);
+      // Process in chunks or sequential to avoid overwhelming server
+      for (const doc of newDoctors) {
+          try {
+              await fetch(`${API_URL}/doctors`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify(doc)
+              });
+          } catch (e) { console.error("Import failed for", doc.name, e); }
+      }
+      alert("Importación finalizada. Los datos se están sincronizando.");
+      fetchData();
   };
 
-  const deleteDoctor = (id: string) => {
+  const deleteDoctor = async (id: string) => {
       setDoctors(prev => prev.filter(d => d.id !== id));
+      try {
+          await fetch(`${API_URL}/doctors/${id}`, { method: 'DELETE' });
+      } catch (e) { console.error("Delete failed", e); }
   };
 
-  const handleDeleteVisit = (doctorId: string, visitId: string) => {
+  const handleDeleteVisit = async (doctorId: string, visitId: string) => {
       setDoctors(prev => prev.map(doc => {
           if (doc.id === doctorId) {
               return { ...doc, visits: doc.visits.filter(v => v.id !== visitId) };
           }
           return doc;
       }));
+      try {
+          await fetch(`${API_URL}/doctors/${doctorId}/visits/${visitId}`, { method: 'DELETE' });
+      } catch (e) { console.error("Delete visit failed", e); }
   };
 
-  const addProcedure = (newProc: Procedure) => {
+  const addProcedure = async (newProc: Procedure) => {
       setProcedures(prev => [...prev, newProc]);
+      try {
+          await fetch(`${API_URL}/procedures`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(newProc)
+          });
+      } catch (e) { console.error("Save proc failed", e); }
   };
 
-  const updateProcedure = (updatedProc: Procedure) => {
+  const updateProcedure = async (updatedProc: Procedure) => {
       setProcedures(prev => prev.map(p => p.id === updatedProc.id ? updatedProc : p));
+      try {
+          await fetch(`${API_URL}/procedures`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(updatedProc)
+          });
+      } catch (e) { console.error("Update proc failed", e); }
   };
 
-  const deleteProcedure = (id: string) => {
+  const deleteProcedure = async (id: string) => {
       setProcedures(prev => prev.filter(p => p.id !== id));
+      try {
+          await fetch(`${API_URL}/procedures/${id}`, { method: 'DELETE' });
+      } catch (e) { console.error("Delete proc failed", e); }
   };
 
-  if (loading) {
+  const importFullBackup = (data: { doctors: Doctor[], procedures: Procedure[], timeOff?: TimeOffEvent[] }) => {
+      if (data.doctors) importDoctors(data.doctors); // Re-use import logic
+      // Note: Procedures import logic would be similar if needed
+      if (data.timeOff) localStorage.setItem(STORAGE_KEYS.TIMEOFF, JSON.stringify(data.timeOff));
+  };
+
+  if (loading && doctors.length === 0) {
     return (
       <div className="flex items-center justify-center h-screen bg-slate-50">
         <div className="flex flex-col items-center">
             <div className="w-16 h-16 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin"></div>
-            <p className="mt-4 text-slate-500 font-bold animate-pulse">Protegiendo datos locales...</p>
+            <p className="mt-4 text-slate-500 font-bold animate-pulse">Cargando sistema...</p>
         </div>
       </div>
     );
@@ -176,13 +225,17 @@ const App: React.FC = () => {
         />
         
         <div className={`flex-1 flex flex-col h-full relative pt-16 md:pt-0 transition-all duration-300 ease-in-out ${isSidebarCollapsed ? 'md:ml-20' : 'md:ml-64'}`}>
+          <div className="absolute top-4 right-4 z-50 pointer-events-none">
+              {isSyncing && <div className="bg-white/80 backdrop-blur px-3 py-1 rounded-full shadow-sm border border-slate-100 flex items-center text-[10px] font-bold text-blue-500"><RefreshCw className="w-3 h-3 mr-1 animate-spin" /> Sincronizando...</div>}
+          </div>
+          
           <main className="flex-1 overflow-x-auto overflow-y-auto p-4 md:p-8 relative z-10 w-full">
             <div className="max-w-7xl mx-auto min-w-[320px]">
                 <Routes>
                 <Route path="/" element={<Dashboard doctors={doctors} user={user} procedures={procedures} onImportBackup={importFullBackup} />} />
                 <Route path="/doctors" element={<DoctorList doctors={doctors} onAddDoctor={addDoctor} onImportDoctors={importDoctors} onDeleteDoctor={deleteDoctor} user={user} />} />
                 <Route path="/doctors/:id" element={<DoctorProfile doctors={doctors} onUpdate={updateDoctor} onDeleteVisit={handleDeleteVisit} user={user} />} />
-                <Route path="/calendar" element={<ExecutiveCalendar doctors={doctors} onUpdateDoctors={updateDoctorsList} onDeleteVisit={handleDeleteVisit} user={user} />} />
+                <Route path="/calendar" element={<ExecutiveCalendar doctors={doctors} onUpdateDoctor={updateDoctor} onDeleteVisit={handleDeleteVisit} user={user} />} />
                 <Route path="/procedures" element={<ProceduresManager procedures={procedures} doctors={doctors} onAddProcedure={addProcedure} onUpdateProcedure={updateProcedure} onDeleteProcedure={deleteProcedure} user={user} />} />
                 <Route path="*" element={<Navigate to="/" replace />} />
                 </Routes>

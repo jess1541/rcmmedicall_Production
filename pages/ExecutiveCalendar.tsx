@@ -9,14 +9,14 @@ registerLocale('es', es);
 
 interface ExecutiveCalendarProps {
   doctors: Doctor[];
-  onUpdateDoctors: (doctors: Doctor[]) => void;
+  onUpdateDoctor: (doctor: Doctor) => void;
   onDeleteVisit: (doctorId: string, visitId: string) => void;
   user: User;
 }
 
 type ViewMode = 'month' | 'week' | 'day';
 
-const ExecutiveCalendar: React.FC<ExecutiveCalendarProps> = ({ doctors, onUpdateDoctors, onDeleteVisit, user }) => {
+const ExecutiveCalendar: React.FC<ExecutiveCalendarProps> = ({ doctors, onUpdateDoctor, onDeleteVisit, user }) => {
   const location = useLocation();
   const [selectedExecutive, setSelectedExecutive] = useState(user.role === 'executive' ? user.name : '');
   const [currentDate, setCurrentDate] = useState(new Date());
@@ -231,15 +231,14 @@ const ExecutiveCalendar: React.FC<ExecutiveCalendarProps> = ({ doctors, onUpdate
       
       if (asAppointment) {
           setPlanObjective('CITA DE CONTACTO');
-          setAppointmentTime(specificTime || '09:00'); // Default or specific
+          setAppointmentTime(specificTime || '09:00'); // Default to allowed slot or specific
       } else {
           setPlanObjective('');
-          setAppointmentTime(specificTime || '09:00'); // Default or specific
+          setAppointmentTime(specificTime || '09:00');
       }
   };
 
   const handleTimeSlotClick = (time: string) => {
-      // Direct pass of time to handleDayClick
       handleDayClick(currentDate, false, time);
   };
 
@@ -275,54 +274,64 @@ const ExecutiveCalendar: React.FC<ExecutiveCalendarProps> = ({ doctors, onUpdate
       
       if (editingAppointment) {
           // Reassign Logic: Remove from old doctor, add to new doctor
-          const doctorsWithoutOldVisit = doctors.map(doc => {
-              if (doc.id === editingAppointment.docId) {
-                  return { ...doc, visits: doc.visits.filter(v => v.id !== editingAppointment.visit.id) };
-              }
-              return doc;
-          });
+          
+          // 1. Remove from old doctor
+          const oldDoc = doctors.find(d => d.id === editingAppointment.docId);
+          if (oldDoc) {
+              const updatedOldDoc = {
+                  ...oldDoc,
+                  visits: oldDoc.visits.filter(v => v.id !== editingAppointment.visit.id)
+              };
+              onUpdateDoctor(updatedOldDoc);
+          }
 
-          const finalDoctors = doctorsWithoutOldVisit.map(doc => {
-               if (doc.id === selectedDoctorId) {
-                   const updatedVisit: Visit = {
-                       ...editingAppointment.visit,
-                       date: dateStr,
-                       time: appointmentTime, // Will be 9:00 or 16:00
-                       objective: planObjective.toUpperCase(), // Will be 'CITA DE CONTACTO'
-                       outcome: 'CITA',
-                       status: 'planned'
-                   };
-                   return { ...doc, visits: [...doc.visits, updatedVisit] };
+          // 2. Add to new doctor (or same doctor if not changed)
+          // Small timeout to allow state update if same doc? No, single calls should handle it via optimistic update in App.tsx
+          const newDoc = doctors.find(d => d.id === selectedDoctorId);
+          if (newDoc) {
+               const updatedVisit: Visit = {
+                   ...editingAppointment.visit,
+                   date: dateStr,
+                   time: appointmentTime,
+                   objective: planObjective.toUpperCase(),
+                   outcome: 'CITA',
+                   status: 'planned'
+               };
+               // If it's the same doctor, we might have just removed it above. 
+               // In a real app with state delays this might conflict, but here we assume sequential processing.
+               // However, simpler logic for same-doc edit:
+               if (editingAppointment.docId === selectedDoctorId) {
+                   // Just update, don't remove and add
+                   const finalVisits = oldDoc!.visits.map(v => v.id === editingAppointment.visit.id ? updatedVisit : v);
+                   onUpdateDoctor({ ...oldDoc!, visits: finalVisits });
+               } else {
+                   // Different doc: Add to new
+                   onUpdateDoctor({ ...newDoc, visits: [...newDoc.visits, updatedVisit] });
                }
-               return doc;
-          });
+          }
 
-          onUpdateDoctors(finalDoctors);
           setIsModalOpen(false);
           alert("Cita reasignada correctamente.");
 
       } else {
           // Create New Logic
-          const updatedDoctors = doctors.map(doc => {
-              if (doc.id === selectedDoctorId) {
-                  const newVisit: Visit = {
-                      id: Date.now().toString(),
-                      date: dateStr,
-                      time: appointmentTime,
-                      note: isAppointmentMode ? 'CITA PROGRAMADA' : 'Visita Planeada',
-                      objective: planObjective.toUpperCase(),
-                      outcome: isAppointmentMode ? 'CITA' : 'PLANEADA',
-                      status: 'planned'
-                  };
-                  const currentVisits = doc.visits || [];
-                  return { ...doc, visits: [...currentVisits, newVisit] };
-              }
-              return doc;
-          });
-
-          onUpdateDoctors(updatedDoctors);
-          setIsModalOpen(false);
-          alert(isAppointmentMode ? "Cita programada correctamente." : "Visita agendada correctamente.");
+          const doc = doctors.find(d => d.id === selectedDoctorId);
+          if (doc) {
+              const newVisit: Visit = {
+                  id: Date.now().toString(),
+                  date: dateStr,
+                  time: appointmentTime,
+                  note: isAppointmentMode ? 'CITA PROGRAMADA' : 'Visita Planeada',
+                  objective: planObjective.toUpperCase(),
+                  outcome: isAppointmentMode ? 'CITA' : 'PLANEADA',
+                  status: 'planned'
+              };
+              const currentVisits = doc.visits || [];
+              onUpdateDoctor({ ...doc, visits: [...currentVisits, newVisit] });
+              
+              setIsModalOpen(false);
+              alert(isAppointmentMode ? "Cita programada correctamente." : "Visita agendada correctamente.");
+          }
       }
   };
 
@@ -365,20 +374,17 @@ const ExecutiveCalendar: React.FC<ExecutiveCalendarProps> = ({ doctors, onUpdate
           return;
       }
 
-      const updatedDoctors = doctors.map(doc => {
-          if (doc.id === selectedVisitToReport.docId) {
-              const updatedVisits = (doc.visits || []).map(v => {
-                  if (v.id === selectedVisitToReport.visit.id) {
-                      return { ...v, date: reportDate, time: reportTime, objective: editObjective.toUpperCase() };
-                  }
-                  return v;
-              });
-              return { ...doc, visits: updatedVisits };
-          }
-          return doc;
-      });
-      onUpdateDoctors(updatedDoctors);
-      setReportModalOpen(false);
+      const doc = doctors.find(d => d.id === selectedVisitToReport.docId);
+      if (doc) {
+          const updatedVisits = (doc.visits || []).map(v => {
+              if (v.id === selectedVisitToReport.visit.id) {
+                  return { ...v, date: reportDate, time: reportTime, objective: editObjective.toUpperCase() };
+              }
+              return v;
+          });
+          onUpdateDoctor({ ...doc, visits: updatedVisits });
+          setReportModalOpen(false);
+      }
   }
 
   const saveReport = () => {
@@ -394,43 +400,39 @@ const ExecutiveCalendar: React.FC<ExecutiveCalendarProps> = ({ doctors, onUpdate
           return;
       }
       
-      const updatedDoctors = doctors.map(doc => {
-          if (doc.id === selectedVisitToReport.docId) {
-              let updatedVisits = (doc.visits || []).map(v => {
-                  if (v.id === selectedVisitToReport.visit.id) {
-                      return {
-                          ...v,
-                          date: reportDate,
-                          time: reportTime, 
-                          note: reportNote.toUpperCase(),
-                          outcome: reportOutcome as any,
-                          followUp: reportFollowUp.toUpperCase(),
-                          status: 'completed' as const
-                      };
-                  }
-                  return v;
-              });
+      const doc = doctors.find(d => d.id === selectedVisitToReport.docId);
+      if (doc) {
+          let updatedVisits = (doc.visits || []).map(v => {
+              if (v.id === selectedVisitToReport.visit.id) {
+                  return {
+                      ...v,
+                      date: reportDate,
+                      time: reportTime, 
+                      note: reportNote.toUpperCase(),
+                      outcome: reportOutcome as any,
+                      followUp: reportFollowUp.toUpperCase(),
+                      status: 'completed' as const
+                  };
+              }
+              return v;
+          });
 
-              // Always add next visit
-              const newVisit: Visit = {
-                  id: `nv-${Date.now()}`,
-                  date: formatDateToString(nextVisitDate),
-                  time: nextVisitTime, 
-                  note: 'Visita Planeada',
-                  objective: reportFollowUp.toUpperCase(), 
-                  outcome: 'PLANEADA',
-                  status: 'planned'
-              };
-              updatedVisits = [...updatedVisits, newVisit];
+          // Always add next visit
+          const newVisit: Visit = {
+              id: `nv-${Date.now()}`,
+              date: formatDateToString(nextVisitDate),
+              time: nextVisitTime, 
+              note: 'Visita Planeada',
+              objective: reportFollowUp.toUpperCase(), 
+              outcome: 'PLANEADA',
+              status: 'planned'
+          };
+          updatedVisits = [...updatedVisits, newVisit];
 
-              return { ...doc, visits: updatedVisits };
-          }
-          return doc;
-      });
-
-      onUpdateDoctors(updatedDoctors);
-      setReportModalOpen(false);
-      alert("Reporte guardado y próxima visita agendada exitosamente.");
+          onUpdateDoctor({ ...doc, visits: updatedVisits });
+          setReportModalOpen(false);
+          alert("Reporte guardado y próxima visita agendada exitosamente.");
+      }
   };
 
   const handleDragStart = (e: React.DragEvent, docId: string, visit: Visit) => {
@@ -452,19 +454,16 @@ const ExecutiveCalendar: React.FC<ExecutiveCalendarProps> = ({ doctors, onUpdate
           const { docId, visitId } = JSON.parse(data);
           const newDateStr = toLocalDateString(targetDate);
           
-          const updatedDoctors = doctors.map(doc => {
-              if (doc.id === docId) {
-                  const updatedVisits = (doc.visits || []).map(v => {
-                      if (v.id === visitId) {
-                          return { ...v, date: newDateStr, time: targetTime || v.time };
-                      }
-                      return v;
-                  });
-                  return { ...doc, visits: updatedVisits };
-              }
-              return doc;
-          });
-          onUpdateDoctors(updatedDoctors);
+          const doc = doctors.find(d => d.id === docId);
+          if (doc) {
+              const updatedVisits = (doc.visits || []).map(v => {
+                  if (v.id === visitId) {
+                      return { ...v, date: newDateStr, time: targetTime || v.time };
+                  }
+                  return v;
+              });
+              onUpdateDoctor({ ...doc, visits: updatedVisits });
+          }
       } catch (error) { console.error("Drop error:", error); }
   };
 
