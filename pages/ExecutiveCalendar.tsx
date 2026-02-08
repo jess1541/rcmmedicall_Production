@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { useLocation } from 'react-router-dom';
 import { Doctor, Visit, User, TimeOffEvent } from '../types';
-import { ChevronLeft, ChevronRight, Plus, Search, Calendar, X, Lock, Clock, Coffee, CheckCircle2, Trash2, Building } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Plus, Search, Calendar, X, Lock, Clock, Coffee, CheckCircle2, Trash2, Building, User as UserIcon } from 'lucide-react';
 import DatePicker, { registerLocale } from 'react-datepicker';
 import es from 'date-fns/locale/es';
 
@@ -9,14 +9,14 @@ registerLocale('es', es);
 
 interface ExecutiveCalendarProps {
   doctors: Doctor[];
-  onUpdateDoctor: (doctor: Doctor) => void;
+  onUpdateDoctors: (doctors: Doctor[]) => void;
   onDeleteVisit: (doctorId: string, visitId: string) => void;
   user: User;
 }
 
 type ViewMode = 'month' | 'week' | 'day';
 
-const ExecutiveCalendar: React.FC<ExecutiveCalendarProps> = ({ doctors, onUpdateDoctor, onDeleteVisit, user }) => {
+const ExecutiveCalendar: React.FC<ExecutiveCalendarProps> = ({ doctors, onUpdateDoctors, onDeleteVisit, user }) => {
   const location = useLocation();
   const [selectedExecutive, setSelectedExecutive] = useState(user.role === 'executive' ? user.name : '');
   const [currentDate, setCurrentDate] = useState(new Date());
@@ -107,10 +107,11 @@ const ExecutiveCalendar: React.FC<ExecutiveCalendarProps> = ({ doctors, onUpdate
       return timeOffEvents.filter(t => t.executive === selectedExecutive);
   }, [timeOffEvents, selectedExecutive]);
 
+  // CHANGED: Use global 'doctors' list for search instead of 'myDoctors'
   const filteredDoctorsForModal = useMemo(() => {
       if (!searchDoctorTerm) return [];
-      return myDoctors.filter(d => d.name.toLowerCase().includes(searchDoctorTerm.toLowerCase()));
-  }, [myDoctors, searchDoctorTerm]);
+      return doctors.filter(d => d.name.toLowerCase().includes(searchDoctorTerm.toLowerCase()));
+  }, [doctors, searchDoctorTerm]);
 
   const getDaysForView = (): (Date | null)[] => {
       const year = currentDate.getFullYear();
@@ -208,6 +209,8 @@ const ExecutiveCalendar: React.FC<ExecutiveCalendarProps> = ({ doctors, onUpdate
               const timeA = a.data.visit.time || '23:59';
               const timeB = b.data.visit.time || '23:59';
               if (timeA !== timeB) return timeA.localeCompare(timeB);
+              if (a.data.visit.status === 'completed' && b.data.visit.status !== 'completed') return 1;
+              if (a.data.visit.status !== 'completed' && b.data.visit.status === 'completed') return -1;
           }
           return 0;
       });
@@ -269,53 +272,57 @@ const ExecutiveCalendar: React.FC<ExecutiveCalendarProps> = ({ doctors, onUpdate
       
       if (editingAppointment) {
           // Reasignar: Eliminar del doctor anterior, agregar al nuevo
-          if (editingAppointment.docId !== selectedDoctorId) {
-             const oldDoc = doctors.find(d => d.id === editingAppointment.docId);
-             if (oldDoc) {
-                 onUpdateDoctor({ ...oldDoc, visits: oldDoc.visits.filter(v => v.id !== editingAppointment.visit.id) });
-             }
-          }
-
-          const targetDoc = doctors.find(d => d.id === selectedDoctorId);
-          if (targetDoc) {
-              // Si es el mismo doc, actualizamos la visita. Si es nuevo, la agregamos.
-              let newVisits = targetDoc.visits;
-              const updatedVisit: Visit = {
-                   ...editingAppointment.visit,
-                   date: dateStr,
-                   time: appointmentTime, 
-                   objective: planObjective.toUpperCase(), 
-                   outcome: 'CITA',
-                   status: 'planned'
-               };
-
-              if (editingAppointment.docId === selectedDoctorId) {
-                  newVisits = targetDoc.visits.map(v => v.id === editingAppointment.visit.id ? updatedVisit : v);
-              } else {
-                  newVisits = [...targetDoc.visits, updatedVisit];
+          // Nota: Esto modifica 'doctors', por lo que debemos procesar todo el array.
+          
+          const newDoctors = doctors.map(doc => {
+              // 1. Si es el doctor original, removemos la visita vieja
+              if (doc.id === editingAppointment.docId) {
+                  return { ...doc, visits: doc.visits.filter(v => v.id !== editingAppointment.visit.id) };
               }
-              onUpdateDoctor({ ...targetDoc, visits: newVisits });
-          }
+              return doc;
+          });
 
+          // 2. Ahora agregamos la visita editada al doctor destino (puede ser el mismo u otro)
+          const finalDoctors = newDoctors.map(doc => {
+              if (doc.id === selectedDoctorId) {
+                   const updatedVisit: Visit = {
+                       ...editingAppointment.visit,
+                       date: dateStr,
+                       time: appointmentTime, 
+                       objective: planObjective.toUpperCase(), 
+                       outcome: 'CITA',
+                       status: 'planned'
+                   };
+                   return { ...doc, visits: [...doc.visits, updatedVisit] };
+              }
+              return doc;
+          });
+
+          onUpdateDoctors(finalDoctors);
           setIsModalOpen(false);
           alert("Cita reasignada correctamente.");
 
       } else {
-          const doc = doctors.find(d => d.id === selectedDoctorId);
-          if (doc) {
-              const newVisit: Visit = {
-                  id: Date.now().toString(),
-                  date: dateStr,
-                  time: appointmentTime,
-                  note: isAppointmentMode ? 'CITA PROGRAMADA' : 'Visita Planeada',
-                  objective: planObjective.toUpperCase(),
-                  outcome: isAppointmentMode ? 'CITA' : 'PLANEADA',
-                  status: 'planned'
-              };
-              onUpdateDoctor({ ...doc, visits: [...doc.visits, newVisit] });
-              setIsModalOpen(false);
-              alert(isAppointmentMode ? "Cita programada correctamente." : "Visita agendada correctamente.");
-          }
+          // Nuevo Plan
+          const updatedDoctors = doctors.map(doc => {
+              if (doc.id === selectedDoctorId) {
+                  const newVisit: Visit = {
+                      id: Date.now().toString(),
+                      date: dateStr,
+                      time: appointmentTime,
+                      note: isAppointmentMode ? 'CITA PROGRAMADA' : 'Visita Planeada',
+                      objective: planObjective.toUpperCase(),
+                      outcome: isAppointmentMode ? 'CITA' : 'PLANEADA',
+                      status: 'planned'
+                  };
+                  return { ...doc, visits: [...doc.visits, newVisit] };
+              }
+              return doc;
+          });
+          
+          onUpdateDoctors(updatedDoctors);
+          setIsModalOpen(false);
+          alert(isAppointmentMode ? "Cita programada correctamente." : "Visita agendada correctamente.");
       }
   };
 
@@ -352,57 +359,64 @@ const ExecutiveCalendar: React.FC<ExecutiveCalendarProps> = ({ doctors, onUpdate
       if (!selectedVisitToReport) return;
       if (!editObjective.trim()) { alert("El objetivo es obligatorio."); return; }
 
-      const doc = doctors.find(d => d.id === selectedVisitToReport.docId);
-      if (doc) {
-          const updatedVisits = doc.visits.map(v => {
-              if (v.id === selectedVisitToReport.visit.id) {
-                  return { ...v, date: reportDate, time: reportTime, objective: editObjective.toUpperCase() };
-              }
-              return v;
-          });
-          onUpdateDoctor({ ...doc, visits: updatedVisits });
-          setReportModalOpen(false);
-      }
+      const updatedDoctors = doctors.map(doc => {
+          if (doc.id === selectedVisitToReport.docId) {
+              const updatedVisits = doc.visits.map(v => {
+                  if (v.id === selectedVisitToReport.visit.id) {
+                      return { ...v, date: reportDate, time: reportTime, objective: editObjective.toUpperCase() };
+                  }
+                  return v;
+              });
+              return { ...doc, visits: updatedVisits };
+          }
+          return doc;
+      });
+      onUpdateDoctors(updatedDoctors);
+      setReportModalOpen(false);
   }
 
   const saveReport = () => {
       if (!selectedVisitToReport) return;
       if (!reportNote.trim() || !reportFollowUp.trim()) { alert("Reporte y Siguiente Paso son obligatorios."); return; }
       
-      const doc = doctors.find(d => d.id === selectedVisitToReport.docId);
-      if (doc) {
-          let updatedVisits = doc.visits.map(v => {
-              if (v.id === selectedVisitToReport.visit.id) {
-                  return {
-                      ...v,
-                      date: reportDate,
-                      time: reportTime, 
-                      note: reportNote.toUpperCase(),
-                      outcome: reportOutcome as any,
-                      followUp: reportFollowUp.toUpperCase(),
-                      status: 'completed' as const
+      const updatedDoctors = doctors.map(doc => {
+          if (doc.id === selectedVisitToReport.docId) {
+              let updatedVisits = doc.visits.map(v => {
+                  if (v.id === selectedVisitToReport.visit.id) {
+                      return {
+                          ...v,
+                          date: reportDate,
+                          time: reportTime, 
+                          note: reportNote.toUpperCase(),
+                          outcome: reportOutcome as any,
+                          followUp: reportFollowUp.toUpperCase(),
+                          status: 'completed' as const
+                      };
+                  }
+                  return v;
+              });
+
+              if (nextVisitDate) {
+                  const newVisit: Visit = {
+                      id: `nv-${Date.now()}`,
+                      date: formatDateToString(nextVisitDate),
+                      time: nextVisitTime, 
+                      note: 'Visita Planeada',
+                      objective: reportFollowUp.toUpperCase(), 
+                      outcome: 'PLANEADA',
+                      status: 'planned'
                   };
+                  updatedVisits = [...updatedVisits, newVisit];
               }
-              return v;
-          });
 
-          if (nextVisitDate) {
-              const newVisit: Visit = {
-                  id: `nv-${Date.now()}`,
-                  date: formatDateToString(nextVisitDate),
-                  time: nextVisitTime, 
-                  note: 'Visita Planeada',
-                  objective: reportFollowUp.toUpperCase(), 
-                  outcome: 'PLANEADA',
-                  status: 'planned'
-              };
-              updatedVisits = [...updatedVisits, newVisit];
+              return { ...doc, visits: updatedVisits };
           }
-
-          onUpdateDoctor({ ...doc, visits: updatedVisits });
-          setReportModalOpen(false);
-          if (nextVisitDate) alert("Reporte guardado y próxima visita agendada.");
-      }
+          return doc;
+      });
+      
+      onUpdateDoctors(updatedDoctors);
+      setReportModalOpen(false);
+      if (nextVisitDate) alert("Reporte guardado y próxima visita agendada.");
   };
 
   const handleDragStart = (e: React.DragEvent, docId: string, visit: Visit) => {
@@ -424,16 +438,19 @@ const ExecutiveCalendar: React.FC<ExecutiveCalendarProps> = ({ doctors, onUpdate
           const { docId, visitId } = JSON.parse(data);
           const newDateStr = toLocalDateString(targetDate);
           
-          const doc = doctors.find(d => d.id === docId);
-          if (doc) {
-              const updatedVisits = doc.visits.map(v => {
-                  if (v.id === visitId) {
-                      return { ...v, date: newDateStr, time: targetTime || v.time };
-                  }
-                  return v;
-              });
-              onUpdateDoctor({ ...doc, visits: updatedVisits });
-          }
+          const updatedDoctors = doctors.map(doc => {
+              if (doc.id === docId) {
+                  const updatedVisits = doc.visits.map(v => {
+                      if (v.id === visitId) {
+                          return { ...v, date: newDateStr, time: targetTime || v.time };
+                      }
+                      return v;
+                  });
+                  return { ...doc, visits: updatedVisits };
+              }
+              return doc;
+          });
+          onUpdateDoctors(updatedDoctors);
       } catch (error) { console.error("Drop error:", error); }
   };
 
@@ -631,7 +648,20 @@ const ExecutiveCalendar: React.FC<ExecutiveCalendarProps> = ({ doctors, onUpdate
                    <div className="p-6 space-y-4 overflow-y-auto">
                         {isAppointmentMode && (<div className="bg-pink-50 p-3 rounded-xl border border-pink-100 flex items-center text-pink-700 text-xs font-bold"><Lock className="w-4 h-4 mr-2" />{editingAppointment ? 'Modo Edición - Cambio de Contacto' : 'Cita Bloqueada - Prioridad Alta'}</div>)}
                         <div><label className="block text-xs font-bold text-slate-500 uppercase mb-2">Contacto</label><div className="relative"><Search className="absolute left-3 top-3.5 h-4 w-4 text-slate-400" /><input type="text" placeholder="BUSCAR MÉDICO..." value={searchDoctorTerm} onChange={(e) => setSearchDoctorTerm(e.target.value.toUpperCase())} className="w-full pl-10 border border-slate-200 bg-slate-50 rounded-xl p-3 text-sm font-bold uppercase focus:ring-2 focus:ring-blue-500 outline-none" /></div>
-                            {searchDoctorTerm && (<div className="mt-2 max-h-40 overflow-y-auto border border-slate-100 rounded-xl bg-white shadow-lg">{filteredDoctorsForModal.map(doc => (<div key={doc.id} onClick={() => { setSelectedDoctorId(doc.id); setSearchDoctorTerm(doc.name); }} className={`p-3 text-xs font-bold border-b last:border-0 cursor-pointer ${selectedDoctorId === doc.id ? 'bg-blue-50 text-blue-700' : 'text-slate-600 hover:bg-slate-50'}`}><div className="uppercase">{doc.name}</div><div className="text-[10px] text-slate-400 font-normal flex items-center mt-1"><Building className="w-3 h-3 mr-1" /> {doc.hospital || doc.address}</div></div>))}</div>)}
+                            {searchDoctorTerm && (
+                                <div className="mt-2 max-h-40 overflow-y-auto border border-slate-100 rounded-xl bg-white shadow-lg">
+                                    {filteredDoctorsForModal.map(doc => (
+                                        <div key={doc.id} onClick={() => { setSelectedDoctorId(doc.id); setSearchDoctorTerm(doc.name); }} className={`p-3 text-xs font-bold border-b last:border-0 cursor-pointer ${selectedDoctorId === doc.id ? 'bg-blue-50 text-blue-700' : 'text-slate-600 hover:bg-slate-50'}`}>
+                                            <div className="uppercase">{doc.name}</div>
+                                            <div className="text-[10px] text-slate-400 font-normal flex items-center mt-1">
+                                                <Building className="w-3 h-3 mr-1" /> {doc.hospital || doc.address}
+                                                <span className="ml-2 bg-slate-100 px-1 rounded text-slate-500 font-bold">{doc.executive}</span>
+                                            </div>
+                                        </div>
+                                    ))}
+                                    {filteredDoctorsForModal.length === 0 && <div className="p-4 text-xs text-slate-400 text-center">No encontrado</div>}
+                                </div>
+                            )}
                         </div>
                         <div><label className="block text-xs font-bold text-slate-500 uppercase mb-2">Hora</label><select value={appointmentTime} onChange={(e) => setAppointmentTime(e.target.value)} disabled={!!editingAppointment} className={`w-full border border-slate-200 bg-white rounded-xl p-3 text-sm font-bold focus:ring-2 focus:ring-blue-500 outline-none ${!!editingAppointment ? 'bg-slate-100 cursor-not-allowed text-slate-500' : ''}`}>{(isAppointmentMode ? appointmentTimeSlots : visitTimeSlots).map(t => <option key={t} value={t}>{t}</option>)}</select></div>
                         <div><label className="block text-xs font-bold text-slate-500 uppercase mb-2">Objetivo</label><textarea rows={2} value={planObjective} onChange={(e) => setPlanObjective(e.target.value.toUpperCase())} disabled={isAppointmentMode} className={`w-full border border-slate-200 rounded-xl p-3 text-sm uppercase font-medium focus:ring-2 focus:ring-blue-500 outline-none resize-none ${isAppointmentMode ? 'bg-slate-100 cursor-not-allowed text-slate-500' : 'bg-white'}`} placeholder={isAppointmentMode ? "MOTIVO DE LA CITA..." : "OBJETIVO DE LA VISITA..."} /></div>
