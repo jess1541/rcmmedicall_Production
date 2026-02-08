@@ -9,38 +9,65 @@ const app = express();
 app.use(express.json({ limit: '50mb' })); 
 app.use(cors());
 
-// --- Database Connection ---
-const isProduction = !!process.env.DATABASE_URL;
+// --- Database Connection (MySQL 8.4 Optimized) ---
 
-const sequelize = isProduction
-    ? new Sequelize(process.env.DATABASE_URL, {
-        dialect: 'postgres',
-        logging: false, // Set to console.log to debug SQL queries
-        dialectOptions: {
-            ssl: {
-                require: true,
-                rejectUnauthorized: false 
-            }
-        },
-        pool: {
-            max: 10,
-            min: 0,
-            acquire: 30000,
-            idle: 10000
+// Validar que existan las credenciales
+if (!process.env.DB_HOST && !process.env.DATABASE_URL) {
+    console.error("❌ ERROR FATAL: No se detectaron variables de entorno para MySQL.");
+    console.error("   Asegúrate de tener DB_HOST, DB_USER, DB_PASS y DB_NAME configurados.");
+    process.exit(1); // Detener la app si no hay DB configurada
+}
+
+let sequelize;
+
+const dbConfig = {
+    dialect: 'mysql',
+    logging: false, // Set to console.log to debug SQL
+    define: {
+        // MySQL 8.4 Best Practice: Full Unicode Support
+        charset: 'utf8mb4',
+        collate: 'utf8mb4_unicode_ci',
+        timestamps: true
+    },
+    pool: {
+        max: 20, // Manejo de concurrencia para múltiples usuarios
+        min: 0,
+        acquire: 60000,
+        idle: 10000
+    },
+    dialectOptions: {
+        // Soporte para fechas como strings si es necesario y manejo de decimales
+        decimalNumbers: true,
+        // Configuración SSL opcional para nubes como Azure/AWS/GCP
+        ssl: process.env.DB_SSL === 'true' ? {
+            require: true,
+            rejectUnauthorized: false
+        } : undefined
+    }
+};
+
+if (process.env.DB_HOST) {
+    // Opción 1: Variables individuales
+    sequelize = new Sequelize(
+        process.env.DB_NAME,
+        process.env.DB_USER,
+        process.env.DB_PASS,
+        {
+            ...dbConfig,
+            host: process.env.DB_HOST,
+            port: process.env.DB_PORT || 3306,
         }
-      })
-    : new Sequelize({
-        dialect: 'sqlite',
-        storage: './database.sqlite',
-        logging: false,
-        retry: { match: [/SQLITE_BUSY/], max: 10 }
-      });
+    );
+} else {
+    // Opción 2: Connection String
+    sequelize = new Sequelize(process.env.DATABASE_URL, dbConfig);
+}
 
 // --- Models ---
 
 const Doctor = sequelize.define('Doctor', {
     id: {
-        type: DataTypes.STRING,
+        type: DataTypes.STRING(255), // 255 es el límite seguro para índices en utf8mb4
         primaryKey: true,
         allowNull: false
     },
@@ -72,11 +99,16 @@ const Doctor = sequelize.define('Doctor', {
         type: DataTypes.JSON, 
         defaultValue: [] 
     }
+}, {
+    indexes: [
+        { fields: ['executive'] },
+        { fields: ['name'] }
+    ]
 });
 
 const Procedure = sequelize.define('Procedure', {
     id: {
-        type: DataTypes.STRING,
+        type: DataTypes.STRING(255),
         primaryKey: true,
         allowNull: false
     },
@@ -92,12 +124,19 @@ const Procedure = sequelize.define('Procedure', {
     technician: DataTypes.STRING,
     notes: DataTypes.TEXT,
     status: DataTypes.STRING
+}, {
+    indexes: [
+        { fields: ['date'] },
+        { fields: ['doctorId'] }
+    ]
 });
 
 // Sync DB
 sequelize.sync({ alter: true })
-    .then(() => console.log("✅ Base de Datos Sincronizada"))
-    .catch(err => console.error("❌ Error DB:", err));
+    .then(() => console.log("✅ MySQL 8.4 Conectado y Sincronizado."))
+    .catch(err => {
+        console.error("❌ Error conectando a MySQL:", err);
+    });
 
 // --- API Routes ---
 
@@ -114,7 +153,9 @@ app.get('/api/doctors', async (req, res) => {
 app.post('/api/doctors', async (req, res) => {
     const data = req.body;
     try {
+        // Upsert simple para registro individual
         await Doctor.upsert(data);
+        // Devolvemos el registro actualizado
         const result = await Doctor.findByPk(data.id);
         res.json(result);
     } catch (error) {
@@ -123,42 +164,46 @@ app.post('/api/doctors', async (req, res) => {
     }
 });
 
-// Optimized Bulk Import for PostgreSQL
+// Optimized Bulk Import for MySQL 8.4
 app.post('/api/doctors/bulk', async (req, res) => {
     const data = req.body;
     if (!Array.isArray(data)) {
         return res.status(400).json({ error: "Data must be an array" });
     }
     
-    console.log(`📥 Iniciando importación de ${data.length} registros...`);
+    console.log(`📥 Importando lote de ${data.length} registros a MySQL...`);
 
-    // PostgreSQL parameter limit workaround: Process in chunks
-    const CHUNK_SIZE = 500; 
+    // MySQL maneja bien lotes grandes, pero dividimos por seguridad de memoria en Node
+    const CHUNK_SIZE = 1000; 
     let processed = 0;
 
     try {
         await sequelize.transaction(async (t) => {
-            // Eliminar registros previos si es una carga full (Opcional, aquí solo insertamos)
-            // Si se desea limpiar la base antes: await Doctor.destroy({ where: {}, transaction: t });
-
             for (let i = 0; i < data.length; i += CHUNK_SIZE) {
                 const chunk = data.slice(i, i + CHUNK_SIZE);
+                
+                // CRUCIAL: Usamos updateOnDuplicate para evitar errores de llave duplicada
+                // y para NO SOBREESCRIBIR 'visits' ni 'schedule' si el médico ya existe.
                 await Doctor.bulkCreate(chunk, {
                     transaction: t,
                     validate: true,
-                    // updateOnDuplicate is not fully supported in standard Sequelize bulkCreate for Postgres without specific options
-                    // Since we generate unique IDs on frontend import, simple INSERT is safer and faster.
-                    ignoreDuplicates: true 
+                    updateOnDuplicate: [
+                        'category', 'executive', 'name', 'specialty', 
+                        'subSpecialty', 'address', 'hospital', 'area', 
+                        'phone', 'email', 'floor', 'officeNumber', 
+                        'birthDate', 'cedula', 'classification', 
+                        'importantNotes', 'isInsuranceDoctor', 'updatedAt'
+                        // NOTA: 'visits' y 'schedule' NO están aquí, por lo que se preservan.
+                    ]
                 });
                 processed += chunk.length;
-                console.log(`   ↳ Procesado lote ${i} - ${i + chunk.length}`);
             }
         });
         
-        console.log("✅ Importación completada exitosamente.");
+        console.log("✅ Importación completada.");
         res.json({ success: true, count: processed });
     } catch (error) {
-        console.error("❌ Error Importación Masiva:", error);
+        console.error("❌ Error Importación MySQL:", error);
         res.status(500).json({ error: error.message });
     }
 });
@@ -178,11 +223,11 @@ app.delete('/api/doctors/:doctorId/visits/:visitId', async (req, res) => {
         const doctor = await Doctor.findByPk(doctorId);
         if (doctor) {
             let visits = doctor.visits || [];
-            // Ensure visits is an array
+            // MySQL a veces devuelve JSON como string dependiendo de la versión/driver
             if (typeof visits === 'string') visits = JSON.parse(visits);
             
             doctor.visits = visits.filter(v => v.id !== visitId);
-            doctor.changed('visits', true);
+            doctor.changed('visits', true); // Forzar detección de cambio en JSON
             await doctor.save();
             res.json({ success: true });
         } else {
