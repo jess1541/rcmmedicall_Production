@@ -3,6 +3,8 @@ import react from '@vitejs/plugin-react';
 
 export default defineConfig({
   plugins: [react()],
+  // Ensure absolute paths for assets in production
+  base: '/', 
   build: {
     outDir: 'dist',
     emptyOutDir: true,
