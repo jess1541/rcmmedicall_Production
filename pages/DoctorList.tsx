@@ -17,7 +17,8 @@ const DoctorList: React.FC<DoctorListProps> = ({ doctors, onAddDoctor, onImportD
   const navigate = useNavigate();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [searchTerm, setSearchTerm] = useState('');
-  const [selectedExecutive, setSelectedExecutive] = useState(user.role === 'executive' ? user.name : 'TODOS');
+  // CHANGED: Default to 'TODOS' for everyone so they can see the full database initially
+  const [selectedExecutive, setSelectedExecutive] = useState('TODOS');
   const [activeTab, setActiveTab] = useState<TabType>('MEDICO');
   
   // Add Modal State
@@ -130,12 +131,8 @@ const DoctorList: React.FC<DoctorListProps> = ({ doctors, onAddDoctor, onImportD
           if (!line) continue;
 
           // Simple parsing: assuming standard CSV (comma separated, quotes for text with commas)
-          // If the regex above fails for complex cases, a library like PapaParse is recommended, 
-          // but for this scope, a robust split is usually enough if exported from the same app.
-          // Fallback simple split if regex returns null (rare)
           let columns = splitCSV(line);
           
-          // Fallback manual split if regex fails or empty lines
           if (!columns || columns.length === 0) {
              columns = line.split(',');
           }
@@ -325,27 +322,20 @@ const DoctorList: React.FC<DoctorListProps> = ({ doctors, onAddDoctor, onImportD
           <div className="flex-1">
             <label className="block text-xs font-bold text-slate-400 uppercase mb-1.5 ml-1">Ejecutivo</label>
             <div className="relative">
-                {user.role === 'admin' ? (
-                    <select
-                        className="block w-full pl-4 pr-10 py-3 text-sm font-bold border-slate-200 bg-slate-50 text-black rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all appearance-none"
-                        value={selectedExecutive}
-                        onChange={(e) => setSelectedExecutive(e.target.value)}
-                    >
-                    {executives.map(exec => (
-                        <option key={exec} value={exec}>{exec}</option>
-                    ))}
-                    </select>
-                ) : (
-                    <div className="block w-full pl-4 pr-10 py-3 text-sm font-bold border border-slate-200 bg-slate-100 text-slate-500 rounded-xl cursor-not-allowed">
-                        {user.name}
-                    </div>
-                )}
+                {/* CHANGED: Enabled for everyone to allow full database visibility */}
+                <select
+                    className="block w-full pl-4 pr-10 py-3 text-sm font-bold border-slate-200 bg-slate-50 text-black rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all appearance-none"
+                    value={selectedExecutive}
+                    onChange={(e) => setSelectedExecutive(e.target.value)}
+                >
+                {executives.map(exec => (
+                    <option key={exec} value={exec}>{exec}</option>
+                ))}
+                </select>
                 
-                {user.role === 'admin' && (
-                    <div className="absolute inset-y-0 right-0 flex items-center px-3 pointer-events-none">
-                        <Filter className="h-4 w-4 text-slate-400" />
-                    </div>
-                )}
+                <div className="absolute inset-y-0 right-0 flex items-center px-3 pointer-events-none">
+                    <Filter className="h-4 w-4 text-slate-400" />
+                </div>
             </div>
           </div>
         </div>
@@ -516,15 +506,12 @@ const DoctorList: React.FC<DoctorListProps> = ({ doctors, onAddDoctor, onImportD
 
                       <div>
                           <label className="block text-xs font-bold text-slate-400 uppercase mb-1.5 ml-1">Ejecutivo Asignado</label>
-                          {user.role === 'admin' ? (
-                              <select className="w-full border border-slate-200 bg-slate-50 rounded-xl p-3 text-sm text-black"
-                                  value={formData.executive} onChange={e => setFormData({...formData, executive: e.target.value})}>
-                                  {executives.filter(e => e !== 'TODOS').map(e => <option key={e} value={e}>{e}</option>)}
-                                  <option value="SIN ASIGNAR">SIN ASIGNAR</option>
-                              </select>
-                          ) : (
-                              <input type="text" disabled className="w-full border border-slate-200 bg-slate-100 text-slate-500 rounded-xl p-3 text-sm font-bold" value={user.name} />
-                          )}
+                          {/* CHANGED: Allowed selection for everyone */}
+                          <select className="w-full border border-slate-200 bg-slate-50 rounded-xl p-3 text-sm text-black"
+                              value={formData.executive} onChange={e => setFormData({...formData, executive: e.target.value})}>
+                              {executives.filter(e => e !== 'TODOS').map(e => <option key={e} value={e}>{e}</option>)}
+                              <option value="SIN ASIGNAR">SIN ASIGNAR</option>
+                          </select>
                       </div>
 
                       <div className="pt-6 flex justify-end gap-3 border-t border-slate-100 mt-2">

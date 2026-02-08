@@ -52,11 +52,7 @@ const DoctorProfile: React.FC<DoctorProfileProps> = ({ doctors, onUpdate, onDele
   useEffect(() => {
     const found = doctors.find(d => d.id === id);
     if (found) {
-      if (user.role === 'executive' && found.executive !== user.name) {
-          alert("No tienes permiso para ver este perfil.");
-          navigate('/doctors');
-          return;
-      }
+      // CHANGED: Removed the permission check so all executives can view any profile
       setDoctor(found);
       if (!isEditing) setFormData(found);
       
@@ -211,14 +207,14 @@ const DoctorProfile: React.FC<DoctorProfileProps> = ({ doctors, onUpdate, onDele
                                 <label className="block text-xs font-extrabold text-slate-500 uppercase mb-2 flex items-center">
                                     <UserPlus className="w-3 h-3 mr-1 text-blue-500" /> Ejecutivo Asignado
                                 </label>
-                                {isEditing && user.role === 'admin' ? (
+                                {/* CHANGED: Allowed all users to edit the executive field */}
+                                {isEditing ? (
                                     <select name="executive" value={formData.executive || ''} onChange={handleInputChange} className="block w-full border border-blue-200 rounded-xl p-3 text-sm text-blue-900 focus:ring-2 focus:ring-blue-500 bg-blue-50/50 font-bold uppercase">
                                         {executives.map(e => <option key={e} value={e}>{e}</option>)}
                                     </select>
                                 ) : (
                                     <p className="text-blue-900 font-black text-base uppercase bg-blue-50 p-3 rounded-xl border border-blue-100 flex items-center justify-between">
                                         {doctor.executive}
-                                        {user.role === 'admin' && !isEditing && <span className="text-[8px] font-bold text-blue-400 bg-white px-2 py-0.5 rounded border border-blue-100">EDITABLE POR ADMIN</span>}
                                     </p>
                                 )}
                             </div>
