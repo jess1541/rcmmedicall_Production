@@ -7,17 +7,11 @@ const fs = require('fs');
 const app = express();
 const PORT = process.env.PORT || 8080;
 
-// 1. Iniciar servidor INMEDIATAMENTE
-app.listen(PORT, '0.0.0.0', () => console.log(`🚀 Server running on port ${PORT}`));
-
-// 2. Health Check
-app.get('/health', (req, res) => res.status(200).send('OK'));
-
-// 3. Middleware
+// 1. Middleware (Must be defined before routes)
 app.use(express.json({ limit: '50mb' }));
 app.use(cors());
 
-// 4. Inicialización Robusta de Base de Datos
+// 2. Inicialización Robusta de Base de Datos
 let sequelize = null;
 let Doctor = null;
 let Procedure = null;
@@ -125,7 +119,7 @@ const initializeDatabase = async () => {
 
 initializeDatabase();
 
-// 5. Middleware de seguridad
+// 3. Middleware de seguridad
 const ensureDB = (req, res, next) => {
     if (!sequelize || !Doctor || !Procedure) {
         return res.status(503).json({ error: "Base de datos no disponible. Intente más tarde." });
@@ -133,7 +127,23 @@ const ensureDB = (req, res, next) => {
     next();
 };
 
-// 6. Rutas de API
+// 4. Rutas de API
+app.get('/health', (req, res) => res.status(200).send('OK'));
+
+app.get('/api/sync-status', ensureDB, async (req, res) => {
+    try {
+        const lastDoctor = await Doctor.findOne({ order: [['updatedAt', 'DESC']], attributes: ['updatedAt'] });
+        const lastProcedure = await Procedure.findOne({ order: [['updatedAt', 'DESC']], attributes: ['updatedAt'] });
+        
+        res.json({
+            doctorsVersion: lastDoctor ? lastDoctor.updatedAt : 0,
+            proceduresVersion: lastProcedure ? lastProcedure.updatedAt : 0
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
 app.get('/api/doctors', ensureDB, async (req, res) => {
     try {
         const doctors = await Doctor.findAll();
@@ -152,7 +162,7 @@ app.post('/api/doctors', ensureDB, async (req, res) => {
 app.post('/api/doctors/bulk', ensureDB, async (req, res) => {
     const data = req.body;
     if (!Array.isArray(data)) return res.status(400).json({ error: "Data must be an array" });
-    const CHUNK_SIZE = 500; // Reducido para mejor manejo de memoria en Cloud Run
+    const CHUNK_SIZE = 500; 
     try {
         await sequelize.transaction(async (t) => {
             for (let i = 0; i < data.length; i += CHUNK_SIZE) {
@@ -160,7 +170,6 @@ app.post('/api/doctors/bulk', ensureDB, async (req, res) => {
                 await Doctor.bulkCreate(chunk, {
                     transaction: t,
                     validate: true,
-                    // FIX: Se agregan 'visits' y 'schedule' para que la actualización masiva no ignore estos campos
                     updateOnDuplicate: [
                         'category', 'executive', 'name', 'specialty', 'subSpecialty', 
                         'address', 'hospital', 'area', 'phone', 'email', 'floor', 
@@ -187,13 +196,11 @@ app.delete('/api/doctors/:doctorId/visits/:visitId', ensureDB, async (req, res) 
         const doctor = await Doctor.findByPk(req.params.doctorId);
         if (doctor) {
             let visits = doctor.visits || [];
-            // Parseo seguro por si la BD devolvió string (común en SQLite/algunas versiones de MySQL)
             if (typeof visits === 'string') {
                 try { visits = JSON.parse(visits); } catch (e) { visits = []; }
             }
             const newVisits = visits.filter(v => v.id !== req.params.visitId);
             
-            // Forzamos actualización explícita
             await Doctor.update(
                 { visits: newVisits },
                 { where: { id: req.params.doctorId } }
@@ -215,7 +222,7 @@ app.delete('/api/procedures/:id', ensureDB, async (req, res) => {
     try { await Procedure.destroy({ where: { id: req.params.id } }); res.json({ success: true }); } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// 7. Archivos Estáticos
+// 5. Archivos Estáticos
 app.use(express.static(path.join(__dirname, 'dist')));
 
 app.get('*', (req, res) => {
@@ -229,3 +236,6 @@ app.get('*', (req, res) => {
         `);
     }
 });
+
+// 6. Start Server (LAST STEP)
+app.listen(PORT, '0.0.0.0', () => console.log(`🚀 Server running on port ${PORT}`));

@@ -117,6 +117,63 @@ const ExecutiveCalendar: React.FC<ExecutiveCalendarProps> = ({ doctors, onUpdate
       return myDoctors.filter(d => d.name.toLowerCase().includes(searchDoctorTerm.toLowerCase()));
   }, [myDoctors, searchDoctorTerm]);
 
+  // --- OPTIMIZATION START: PRE-CALCULATE EVENTS MAP ---
+  // Create a dictionary of events by date string to avoid looping doctors for every single day cell.
+  // Complexity reduction: O(N*days) -> O(1) lookup per cell.
+  const eventsMap = useMemo(() => {
+      const map: Record<string, { type: 'visit' | 'timeoff', data: any }[]> = {};
+
+      // 1. Map Visits
+      myDoctors.forEach(doc => {
+          if (!doc.visits) return;
+          doc.visits.forEach(visit => {
+              const dateKey = visit.date;
+              if (!map[dateKey]) map[dateKey] = [];
+              map[dateKey].push({ 
+                  type: 'visit', 
+                  data: { docId: doc.id, docName: doc.name, docCategory: doc.category, visit, address: doc.address } 
+              });
+          });
+      });
+
+      // 2. Map Time Offs (Range expansion)
+      myTimeOffs.forEach(toff => {
+          let curr = new Date(toff.startDate + 'T00:00:00');
+          const end = new Date(toff.endDate + 'T00:00:00');
+          
+          while (curr <= end) {
+              const dateKey = curr.toISOString().split('T')[0];
+              if (!map[dateKey]) map[dateKey] = [];
+              map[dateKey].push({ type: 'timeoff', data: toff });
+              curr.setDate(curr.getDate() + 1);
+          }
+      });
+
+      // 3. Sort events within each day
+      Object.keys(map).forEach(key => {
+          map[key].sort((a, b) => {
+              if (a.type === 'timeoff' && b.type !== 'timeoff') return -1;
+              if (a.type !== 'timeoff' && b.type === 'timeoff') return 1;
+              if (a.type === 'visit' && b.type === 'visit') {
+                  const timeA = a.data.visit.time || '23:59';
+                  const timeB = b.data.visit.time || '23:59';
+                  if (timeA !== timeB) return timeA.localeCompare(timeB);
+                  if (a.data.visit.status === 'completed' && b.data.visit.status !== 'completed') return 1;
+                  if (a.data.visit.status !== 'completed' && b.data.visit.status === 'completed') return -1;
+              }
+              return 0;
+          });
+      });
+
+      return map;
+  }, [myDoctors, myTimeOffs]);
+
+  const getEventsForDate = (date: Date) => {
+      const dateStr = toLocalDateString(date);
+      return eventsMap[dateStr] || [];
+  };
+  // --- OPTIMIZATION END ---
+
   const getDaysForView = (): (Date | null)[] => {
       const year = currentDate.getFullYear();
       const month = currentDate.getMonth();
@@ -168,10 +225,6 @@ const ExecutiveCalendar: React.FC<ExecutiveCalendarProps> = ({ doctors, onUpdate
       return `${year}-${month}-${day}`;
   };
 
-  const isDateInRange = (checkDate: string, start: string, end: string) => {
-      return checkDate >= start && checkDate <= end;
-  };
-
   const parseDateString = (dateStr: string) => {
       if (!dateStr) return new Date();
       const [year, month, day] = dateStr.split('-').map(Number);
@@ -184,40 +237,6 @@ const ExecutiveCalendar: React.FC<ExecutiveCalendarProps> = ({ doctors, onUpdate
       const month = String(date.getMonth() + 1).padStart(2, '0');
       const day = String(date.getDate()).padStart(2, '0');
       return `${year}-${month}-${day}`;
-  };
-
-  const getEventsForDate = (date: Date) => {
-      const dateStr = toLocalDateString(date);
-      const events: { type: 'visit' | 'timeoff', data: any }[] = [];
-      
-      myDoctors.forEach(doc => {
-          const visits = doc.visits || [];
-          visits.forEach(visit => {
-              if (visit.date === dateStr) {
-                  events.push({ type: 'visit', data: { docId: doc.id, docName: doc.name, docCategory: doc.category, visit, address: doc.address } });
-              }
-          });
-      });
-
-      myTimeOffs.forEach(toff => {
-          if (isDateInRange(dateStr, toff.startDate, toff.endDate)) {
-              events.push({ type: 'timeoff', data: toff });
-          }
-      });
-
-      return events.sort((a, b) => {
-          if (a.type === 'timeoff' && b.type !== 'timeoff') return -1;
-          if (a.type !== 'timeoff' && b.type === 'timeoff') return 1;
-
-          if (a.type === 'visit' && b.type === 'visit') {
-              const timeA = a.data.visit.time || '23:59';
-              const timeB = b.data.visit.time || '23:59';
-              if (timeA !== timeB) return timeA.localeCompare(timeB);
-              if (a.data.visit.status === 'completed' && b.data.visit.status !== 'completed') return 1;
-              if (a.data.visit.status !== 'completed' && b.data.visit.status === 'completed') return -1;
-          }
-          return 0;
-      });
   };
 
   // Triggered when clicking a day or "Programar Cita" button
@@ -285,52 +304,52 @@ const ExecutiveCalendar: React.FC<ExecutiveCalendarProps> = ({ doctors, onUpdate
               return doc;
           });
 
-          // Must optimize to only send affected doctors
-          const affectedDoctors: Doctor[] = [];
-          
-          const oldDoc = doctorsWithoutOldVisit.find(d => d.id === editingAppointment.docId);
-          if(oldDoc) affectedDoctors.push(oldDoc);
+          const finalDoctors = doctorsWithoutOldVisit.map(doc => {
+               if (doc.id === selectedDoctorId) {
+                   const updatedVisit: Visit = {
+                       ...editingAppointment.visit,
+                       date: dateStr,
+                       time: appointmentTime, // Will be 9:00 or 16:00
+                       objective: planObjective.toUpperCase(), // Will be 'CITA DE CONTACTO'
+                       outcome: 'CITA',
+                       status: 'planned'
+                   };
+                   return { ...doc, visits: [...doc.visits, updatedVisit] };
+               }
+               return doc;
+          });
 
-          const newDoc = doctorsWithoutOldVisit.find(d => d.id === selectedDoctorId);
-          if (newDoc) {
-               const updatedVisit: Visit = {
-                   ...editingAppointment.visit,
-                   date: dateStr,
-                   time: appointmentTime,
-                   objective: planObjective.toUpperCase(),
-                   outcome: 'CITA',
-                   status: 'planned'
-               };
-               const updatedNewDoc = { ...newDoc, visits: [...newDoc.visits, updatedVisit] };
-               affectedDoctors.push(updatedNewDoc);
-          }
-
-          onUpdateDoctors(affectedDoctors);
+          onUpdateDoctors(finalDoctors);
           setIsModalOpen(false);
-          alert("Cita reprogramada correctamente.");
+          alert("Cita reasignada correctamente.");
 
       } else {
           // Create New Logic
-          const doc = doctors.find(d => d.id === selectedDoctorId);
-          if (doc) {
-              const newVisit: Visit = {
-                  id: generateId(),
-                  date: dateStr,
-                  time: appointmentTime,
-                  note: isAppointmentMode ? 'CITA PROGRAMADA' : 'Visita Planeada',
-                  objective: planObjective.toUpperCase(),
-                  outcome: isAppointmentMode ? 'CITA' : 'PLANEADA',
-                  status: 'planned'
-              };
-              const updatedDoc = { ...doc, visits: [...doc.visits, newVisit] };
-              onUpdateDoctors([updatedDoc]);
-              setIsModalOpen(false);
-              alert(isAppointmentMode ? "Cita programada correctamente." : "Visita agendada correctamente.");
-          }
+          const updatedDoctors = doctors.map(doc => {
+              if (doc.id === selectedDoctorId) {
+                  const newVisit: Visit = {
+                      id: Date.now().toString(),
+                      date: dateStr,
+                      time: appointmentTime,
+                      note: isAppointmentMode ? 'CITA PROGRAMADA' : 'Visita Planeada',
+                      objective: planObjective.toUpperCase(),
+                      outcome: isAppointmentMode ? 'CITA' : 'PLANEADA',
+                      status: 'planned'
+                  };
+                  const currentVisits = doc.visits || [];
+                  return { ...doc, visits: [...currentVisits, newVisit] };
+              }
+              return doc;
+          });
+
+          onUpdateDoctors(updatedDoctors);
+          setIsModalOpen(false);
+          alert(isAppointmentMode ? "Cita programada correctamente." : "Visita agendada correctamente.");
       }
   };
 
   const openReportModal = (docId: string, visit: Visit) => {
+      // Do not open report modal for Appointments, redirect to edit handler instead or do nothing (handled by click logic)
       if ((visit.outcome as string) === 'CITA') return; 
 
       setSelectedVisitToReport({ docId, visit });
@@ -366,17 +385,20 @@ const ExecutiveCalendar: React.FC<ExecutiveCalendarProps> = ({ doctors, onUpdate
           return;
       }
 
-      const doc = doctors.find(d => d.id === selectedVisitToReport.docId);
-      if (doc) {
-          const updatedVisits = doc.visits.map(v => {
-               if (v.id === selectedVisitToReport.visit.id) {
-                   return { ...v, date: reportDate, time: reportTime, objective: editObjective.toUpperCase() };
-               }
-               return v;
-          });
-          onUpdateDoctors([{ ...doc, visits: updatedVisits }]);
-          setReportModalOpen(false);
-      }
+      const updatedDoctors = doctors.map(doc => {
+          if (doc.id === selectedVisitToReport.docId) {
+              const updatedVisits = (doc.visits || []).map(v => {
+                  if (v.id === selectedVisitToReport.visit.id) {
+                      return { ...v, date: reportDate, time: reportTime, objective: editObjective.toUpperCase() };
+                  }
+                  return v;
+              });
+              return { ...doc, visits: updatedVisits };
+          }
+          return doc;
+      });
+      onUpdateDoctors(updatedDoctors);
+      setReportModalOpen(false);
   }
 
   const saveReport = () => {
@@ -386,40 +408,44 @@ const ExecutiveCalendar: React.FC<ExecutiveCalendarProps> = ({ doctors, onUpdate
           return;
       }
       
-      const doc = doctors.find(d => d.id === selectedVisitToReport.docId);
-      if (doc) {
-          let updatedVisits = doc.visits.map(v => {
-              if (v.id === selectedVisitToReport.visit.id) {
-                   return {
-                       ...v,
-                       date: reportDate,
-                       time: reportTime,
-                       note: reportNote.toUpperCase(),
-                       outcome: reportOutcome as any,
-                       followUp: reportFollowUp.toUpperCase(),
-                       status: 'completed' as const
-                   };
+      const updatedDoctors = doctors.map(doc => {
+          if (doc.id === selectedVisitToReport.docId) {
+              let updatedVisits = (doc.visits || []).map(v => {
+                  if (v.id === selectedVisitToReport.visit.id) {
+                      return {
+                          ...v,
+                          date: reportDate,
+                          time: reportTime, 
+                          note: reportNote.toUpperCase(),
+                          outcome: reportOutcome as any,
+                          followUp: reportFollowUp.toUpperCase(),
+                          status: 'completed' as const
+                      };
+                  }
+                  return v;
+              });
+
+              if (nextVisitDate) {
+                  const newVisit: Visit = {
+                      id: `nv-${Date.now()}`,
+                      date: formatDateToString(nextVisitDate),
+                      time: nextVisitTime, 
+                      note: 'Visita Planeada',
+                      objective: reportFollowUp.toUpperCase(), 
+                      outcome: 'PLANEADA',
+                      status: 'planned'
+                  };
+                  updatedVisits = [...updatedVisits, newVisit];
               }
-              return v;
-          });
 
-          if (nextVisitDate) {
-              const newVisit: Visit = {
-                  id: generateId(),
-                  date: formatDateToString(nextVisitDate),
-                  time: nextVisitTime, 
-                  note: 'Visita Planeada',
-                  objective: reportFollowUp.toUpperCase(), 
-                  outcome: 'PLANEADA',
-                  status: 'planned'
-              };
-              updatedVisits = [...updatedVisits, newVisit];
+              return { ...doc, visits: updatedVisits };
           }
+          return doc;
+      });
 
-          onUpdateDoctors([{ ...doc, visits: updatedVisits }]);
-          setReportModalOpen(false);
-          if (nextVisitDate) alert("Reporte guardado y próxima visita agendada.");
-      }
+      onUpdateDoctors(updatedDoctors);
+      setReportModalOpen(false);
+      if (nextVisitDate) alert("Reporte guardado y próxima visita agendada.");
   };
 
   const handleDragStart = (e: React.DragEvent, docId: string, visit: Visit) => {
@@ -441,16 +467,19 @@ const ExecutiveCalendar: React.FC<ExecutiveCalendarProps> = ({ doctors, onUpdate
           const { docId, visitId } = JSON.parse(data);
           const newDateStr = toLocalDateString(targetDate);
           
-          const doc = doctors.find(d => d.id === docId);
-          if (doc) {
-              const updatedVisits = doc.visits.map(v => {
-                  if (v.id === visitId) {
-                      return { ...v, date: newDateStr, time: targetTime || v.time };
-                  }
-                  return v;
-              });
-              onUpdateDoctors([{ ...doc, visits: updatedVisits }]);
-          }
+          const updatedDoctors = doctors.map(doc => {
+              if (doc.id === docId) {
+                  const updatedVisits = (doc.visits || []).map(v => {
+                      if (v.id === visitId) {
+                          return { ...v, date: newDateStr, time: targetTime || v.time };
+                      }
+                      return v;
+                  });
+                  return { ...doc, visits: updatedVisits };
+              }
+              return doc;
+          });
+          onUpdateDoctors(updatedDoctors);
       } catch (error) { console.error("Drop error:", error); }
   };
 
@@ -487,7 +516,7 @@ const ExecutiveCalendar: React.FC<ExecutiveCalendarProps> = ({ doctors, onUpdate
 
   const handleSaveTimeOff = () => {
       const event: TimeOffEvent = {
-          id: `toff-${generateId()}`,
+          id: `toff-${Date.now()}`,
           executive: selectedExecutive,
           startDate: newTimeOff.startDate || new Date().toISOString().split('T')[0],
           endDate: newTimeOff.endDate || new Date().toISOString().split('T')[0],
@@ -510,8 +539,6 @@ const ExecutiveCalendar: React.FC<ExecutiveCalendarProps> = ({ doctors, onUpdate
           setSelectedTimeOff(null);
       }
   };
-
-  // ... (Rest of render methods remain similar)
 
   const getHeaderTitle = () => {
       if (viewMode === 'day') return currentDate.toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
@@ -658,6 +685,7 @@ const ExecutiveCalendar: React.FC<ExecutiveCalendarProps> = ({ doctors, onUpdate
                        {calendarDays.map((day, idx) => {
                            if (viewMode !== 'day' && day === null) return <div key={`empty-${idx}`} className="bg-slate-50/20 min-h-[100px]"></div>;
                            
+                           // USE OPTIMIZED MAP LOOKUP
                            const events = day ? getEventsForDate(day) : [];
                            const isToday = day ? new Date().toDateString() === day.toDateString() : false;
 

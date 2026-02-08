@@ -1,7 +1,7 @@
-import React, { useState, useMemo, useRef } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Doctor, ScheduleSlot, User } from '../types';
-import { Search, Filter, MapPin, Stethoscope, User as UserIcon, Download, Plus, X, ArrowRight, Building2, Briefcase, Trash2, Upload } from 'lucide-react';
+import { Search, Filter, MapPin, Stethoscope, User as UserIcon, Download, Plus, X, ArrowRight, Building2, Briefcase, Trash2, Upload, ChevronDown } from 'lucide-react';
 
 interface DoctorListProps {
   doctors: Doctor[];
@@ -16,9 +16,13 @@ type TabType = 'MEDICO' | 'ADMINISTRATIVO' | 'HOSPITAL';
 const DoctorList: React.FC<DoctorListProps> = ({ doctors, onAddDoctor, onImportDoctors, onDeleteDoctor, user }) => {
   const navigate = useNavigate();
   const fileInputRef = useRef<HTMLInputElement>(null);
+  
+  // States
   const [searchTerm, setSearchTerm] = useState('');
+  const [debouncedSearchTerm, setDebouncedSearchTerm] = useState(''); // New: Debounce state
   const [selectedExecutive, setSelectedExecutive] = useState('TODOS');
   const [activeTab, setActiveTab] = useState<TabType>('MEDICO');
+  const [visibleCount, setVisibleCount] = useState(20); // New: Pagination limit
   
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [formSubmitted, setFormSubmitted] = useState(false);
@@ -35,6 +39,15 @@ const DoctorList: React.FC<DoctorListProps> = ({ doctors, onAddDoctor, onImportD
       importantNotes: ''
   });
 
+  // Debounce Logic: Wait 300ms after typing stops to update filter
+  useEffect(() => {
+      const handler = setTimeout(() => {
+          setDebouncedSearchTerm(searchTerm);
+          setVisibleCount(20); // Reset pagination on new search
+      }, 300);
+      return () => clearTimeout(handler);
+  }, [searchTerm]);
+
   const executives = useMemo(() => {
     const execs = new Set(doctors.map(d => d.executive ? d.executive.trim().toUpperCase() : 'SIN ASIGNAR'));
     return ['TODOS', ...Array.from(execs).sort()];
@@ -43,8 +56,12 @@ const DoctorList: React.FC<DoctorListProps> = ({ doctors, onAddDoctor, onImportD
   const filteredItems = useMemo(() => {
     return doctors.filter(doc => {
       const category = doc.category || 'MEDICO';
-      const matchesSearch = doc.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
-                            doc.address.toLowerCase().includes(searchTerm.toLowerCase());
+      
+      // Use Debounced term for performance
+      const searchLower = debouncedSearchTerm.toLowerCase();
+      const matchesSearch = !debouncedSearchTerm || 
+                            doc.name.toLowerCase().includes(searchLower) || 
+                            doc.address.toLowerCase().includes(searchLower);
       
       const docExec = doc.executive ? doc.executive.trim().toUpperCase() : 'SIN ASIGNAR';
       const matchesExec = selectedExecutive === 'TODOS' || docExec === selectedExecutive;
@@ -52,7 +69,16 @@ const DoctorList: React.FC<DoctorListProps> = ({ doctors, onAddDoctor, onImportD
       
       return matchesSearch && matchesExec && matchesTab;
     });
-  }, [doctors, searchTerm, selectedExecutive, activeTab]);
+  }, [doctors, debouncedSearchTerm, selectedExecutive, activeTab]);
+
+  // Pagination Logic
+  const visibleItems = useMemo(() => {
+      return filteredItems.slice(0, visibleCount);
+  }, [filteredItems, visibleCount]);
+
+  const handleLoadMore = () => {
+      setVisibleCount(prev => prev + 20);
+  };
 
   const handleExport = () => {
     const headers = [
@@ -78,7 +104,6 @@ const DoctorList: React.FC<DoctorListProps> = ({ doctors, onAddDoctor, onImportD
     ];
 
     const csvString = csvRows.join('\n');
-    // Add BOM for correct Excel UTF-8 reading
     const blob = new Blob(["\uFEFF" + csvString], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -102,12 +127,12 @@ const DoctorList: React.FC<DoctorListProps> = ({ doctors, onAddDoctor, onImportD
           const text = event.target?.result as string;
           processCSV(text);
       };
-      reader.readAsText(file);
+      // Explicitly read as UTF-8
+      reader.readAsText(file, 'UTF-8');
       e.target.value = '';
   };
 
   const processCSV = (csvText: string) => {
-      // 1. Remove BOM if present (Fixes first column weird char issue)
       const cleanText = csvText.replace(/^\uFEFF/, '');
       const lines = cleanText.split('\n');
       
@@ -120,7 +145,6 @@ const DoctorList: React.FC<DoctorListProps> = ({ doctors, onAddDoctor, onImportD
       const days = ['LUNES', 'MARTES', 'MIÉRCOLES', 'JUEVES', 'VIERNES', 'SÁBADO', 'TODOS LOS DÍAS'];
       
       const splitCSV = (str: string) => {
-          // Robust regex to split by comma but ignore commas inside quotes
           const matches = str.match(/(".*?"|[^",\s]+)(?=\s*,|\s*$)/g);
           return matches ? matches.map(m => m.replace(/^"|"$/g, '').trim()) : [];
       };
@@ -130,7 +154,6 @@ const DoctorList: React.FC<DoctorListProps> = ({ doctors, onAddDoctor, onImportD
           if (!line) continue;
 
           let columns = splitCSV(line);
-          // Fallback if regex fails on simple line
           if (!columns || columns.length === 0) columns = line.split(',');
 
           if (columns.length >= 2) {
@@ -142,8 +165,6 @@ const DoctorList: React.FC<DoctorListProps> = ({ doctors, onAddDoctor, onImportD
               let executive = (columns[2] || 'SIN ASIGNAR').trim().toUpperCase().replace(/['"]+/g, '');
 
               const initialSchedule: ScheduleSlot[] = days.map(day => ({ day, time: '', active: false }));
-
-              // Generate ID that is statistically unique for bulk import
               const uniqueId = `imp-${Date.now().toString(36)}-${Math.random().toString(36).substr(2, 9)}`;
 
               const newDoc: Doctor = {
@@ -162,14 +183,12 @@ const DoctorList: React.FC<DoctorListProps> = ({ doctors, onAddDoctor, onImportD
                   schedule: initialSchedule,
                   isInsuranceDoctor: false
               };
-              
               newDoctors.push(newDoc);
           }
       }
 
       if (newDoctors.length > 0 && onImportDoctors) {
-          const confirmMsg = `Se encontraron ${newDoctors.length} registros válidos. \n\n¿Desea importarlos a la base de datos?\n\nNOTA: Esto puede tomar unos segundos. Por favor espere a que termine el proceso.`;
-          if (window.confirm(confirmMsg)) {
+          if (window.confirm(`Se encontraron ${newDoctors.length} registros válidos. \n\n¿Desea importarlos?`)) {
               onImportDoctors(newDoctors);
           }
       } else {
@@ -180,7 +199,7 @@ const DoctorList: React.FC<DoctorListProps> = ({ doctors, onAddDoctor, onImportD
   const handleDelete = (e: React.MouseEvent, id: string) => {
       e.preventDefault();
       e.stopPropagation();
-      if (window.confirm('¿Está seguro de eliminar este registro permanentemente?')) {
+      if (window.confirm('¿Eliminar permanentemente?')) {
           onDeleteDoctor && onDeleteDoctor(id);
       }
   };
@@ -239,83 +258,65 @@ const DoctorList: React.FC<DoctorListProps> = ({ doctors, onAddDoctor, onImportD
   };
 
   return (
-    <div className="space-y-6 relative pb-10">
+    <div className="space-y-4 relative pb-10">
       <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
         <div>
-            <h1 className="text-3xl font-black text-slate-800 tracking-tight">Directorio</h1>
-            <p className="text-slate-500 font-medium">Gestiona tu base de datos de contactos.</p>
+            <h1 className="text-2xl font-black text-slate-800 tracking-tight">Directorio</h1>
+            <p className="text-xs text-slate-500 font-medium">Gestiona tu base de datos de contactos.</p>
         </div>
         
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2">
             <button 
                 onClick={() => setIsAddModalOpen(true)}
-                className="flex items-center px-4 py-2.5 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition shadow-sm font-bold text-sm active:scale-95"
+                className="flex items-center px-3 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition font-bold text-xs"
             >
-                <Plus className="h-4 w-4 mr-2" />
-                Registrar Nuevo
+                <Plus className="h-4 w-4 mr-1" />
+                Nuevo
             </button>
             
-            <div className="h-8 w-px bg-slate-200 mx-1"></div>
+            <div className="h-6 w-px bg-slate-200 mx-1"></div>
 
-            <button 
-                onClick={handleImportClick}
-                className="flex items-center px-4 py-2.5 bg-white border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 transition shadow-sm font-bold text-sm active:scale-95"
-            >
-                <Upload className="h-4 w-4 mr-2 text-slate-500" />
-                Importar
+            <button onClick={handleImportClick} className="flex items-center px-3 py-2 bg-white border border-slate-200 text-slate-600 rounded-lg hover:bg-slate-50 transition font-bold text-xs">
+                <Upload className="h-4 w-4 mr-1" /> Importar
             </button>
-            <input 
-                type="file" 
-                ref={fileInputRef}
-                onChange={handleFileChange}
-                accept=".csv"
-                className="hidden"
-            />
+            <input type="file" ref={fileInputRef} onChange={handleFileChange} accept=".csv" className="hidden" />
 
-            <button 
-                onClick={handleExport}
-                className="flex items-center px-4 py-2.5 bg-white border border-slate-200 text-slate-600 rounded-xl hover:bg-slate-50 transition shadow-sm font-bold text-sm active:scale-95"
-            >
-                <Download className="h-4 w-4 mr-2 text-slate-500" />
-                Exportar
+            <button onClick={handleExport} className="flex items-center px-3 py-2 bg-white border border-slate-200 text-slate-600 rounded-lg hover:bg-slate-50 transition font-bold text-xs">
+                <Download className="h-4 w-4 mr-1" /> Exportar
             </button>
         </div>
       </div>
 
-      <div className="flex space-x-1 bg-slate-100 p-1 rounded-2xl w-fit">
+      <div className="flex space-x-1 bg-slate-200 p-1 rounded-xl w-fit">
           {(['MEDICO', 'ADMINISTRATIVO', 'HOSPITAL'] as TabType[]).map(tab => (
               <button
                   key={tab}
-                  onClick={() => setActiveTab(tab)}
-                  className={`px-6 py-2 rounded-xl text-xs font-bold transition-all ${activeTab === tab ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                  onClick={() => { setActiveTab(tab); setVisibleCount(20); }}
+                  className={`px-4 py-1.5 rounded-lg text-[10px] font-bold transition-colors ${activeTab === tab ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
               >
                   {tab === 'MEDICO' ? 'MÉDICOS' : (tab === 'ADMINISTRATIVO' ? 'ADMINISTRATIVOS' : 'HOSPITALES')}
               </button>
           ))}
       </div>
 
-      <div className="bg-white p-5 rounded-3xl shadow-sm border border-slate-100 space-y-4">
-        <div className="relative group">
-          <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
-            <Search className="h-5 w-5 text-slate-400 group-focus-within:text-blue-500 transition-colors" />
+      <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-200 space-y-3">
+        <div className="relative">
+          <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+            <Search className="h-4 w-4 text-slate-400" />
           </div>
           <input
             type="text"
-            spellCheck={true}
-            lang="es"
-            className="block w-full pl-11 pr-4 py-3 border border-slate-200 rounded-xl leading-5 bg-slate-50 text-black placeholder-slate-400 focus:outline-none focus:placeholder-slate-400 focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all uppercase"
+            className="block w-full pl-10 pr-4 py-2 border border-slate-200 rounded-lg text-sm bg-slate-50 text-black placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-blue-500 transition-colors uppercase"
             placeholder={`BUSCAR ${activeTab}...`}
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value.toUpperCase())}
           />
         </div>
         
-        <div className="flex flex-col md:flex-row gap-4">
-          <div className="flex-1">
-            <label className="block text-xs font-bold text-slate-400 uppercase mb-1.5 ml-1">Ejecutivo</label>
+        <div>
             <div className="relative">
                 <select
-                    className="block w-full pl-4 pr-10 py-3 text-sm font-bold border-slate-200 bg-slate-50 text-black rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all appearance-none"
+                    className="block w-full pl-3 pr-10 py-2 text-xs font-bold border border-slate-200 bg-slate-50 text-black rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-500 appearance-none"
                     value={selectedExecutive}
                     onChange={(e) => setSelectedExecutive(e.target.value)}
                 >
@@ -324,108 +325,118 @@ const DoctorList: React.FC<DoctorListProps> = ({ doctors, onAddDoctor, onImportD
                 ))}
                 </select>
                 <div className="absolute inset-y-0 right-0 flex items-center px-3 pointer-events-none">
-                    <Filter className="h-4 w-4 text-slate-400" />
+                    <Filter className="h-3 w-3 text-slate-400" />
                 </div>
             </div>
-          </div>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {filteredItems.map((item) => (
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        {visibleItems.map((item) => (
           <div
             key={item.id}
             onClick={() => handleCardClick(item.id)}
-            className={`group block bg-white rounded-3xl shadow-sm border transition-all duration-300 hover:shadow-xl hover:-translate-y-1 relative overflow-hidden cursor-pointer ${item.isInsuranceDoctor ? 'border-l-4 border-l-yellow-400 border-t border-r border-b border-slate-100' : 'border border-slate-100'}`}
+            className={`group block bg-white rounded-xl border hover:border-blue-300 cursor-pointer ${item.isInsuranceDoctor ? 'border-l-4 border-l-yellow-400 border-t border-r border-b border-slate-200' : 'border-slate-200'}`}
           >
-            <div className="p-6 relative z-10">
-              <div className="flex justify-between items-start mb-4">
-                 <div className={`rounded-2xl p-3 text-white shadow-sm ${
+            <div className="p-4">
+              <div className="flex justify-between items-start mb-2">
+                 <div className={`rounded-lg p-2 text-white ${
                      activeTab === 'MEDICO' ? 'bg-blue-500' : 
                      activeTab === 'ADMINISTRATIVO' ? 'bg-purple-500' : 'bg-emerald-500'
                  }`}>
-                    {activeTab === 'MEDICO' ? <Stethoscope className="h-6 w-6" /> : 
-                     activeTab === 'ADMINISTRATIVO' ? <Briefcase className="h-6 w-6" /> : <Building2 className="h-6 w-6" />}
+                    {activeTab === 'MEDICO' ? <Stethoscope className="h-4 w-4" /> : 
+                     activeTab === 'ADMINISTRATIVO' ? <Briefcase className="h-4 w-4" /> : <Building2 className="h-4 w-4" />}
                  </div>
-                 <div className="flex flex-col items-end gap-2 relative z-20">
+                 <div className="flex flex-col items-end gap-1">
                     {item.isInsuranceDoctor && (
-                        <span className="bg-yellow-100 text-yellow-700 text-[10px] font-black uppercase px-2 py-1 rounded-lg tracking-wide shadow-sm">
+                        <span className="bg-yellow-100 text-yellow-800 text-[9px] font-black uppercase px-1.5 py-0.5 rounded tracking-wide">
                             Aseguradora
                         </span>
                     )}
                     {user.role === 'admin' && (
                         <button 
                             onClick={(e) => handleDelete(e, item.id)}
-                            className="flex items-center justify-center text-slate-400 hover:text-white hover:bg-red-500 p-2 rounded-lg transition-all shadow-sm border border-transparent hover:border-red-400 hover:shadow-red-200 transform hover:scale-105"
-                            title="Eliminar registro"
+                            className="text-slate-300 hover:text-red-500 p-1 transition-colors"
                         >
-                            <Trash2 className="h-4 w-4" />
+                            <Trash2 className="h-3 w-3" />
                         </button>
                     )}
                  </div>
               </div>
               
-              <h3 className="text-lg font-black text-slate-800 mb-1 line-clamp-1 group-hover:text-blue-700 transition-colors uppercase" title={item.name}>{item.name}</h3>
+              <h3 className="text-sm font-black text-slate-800 mb-1 line-clamp-1 uppercase" title={item.name}>{item.name}</h3>
               
-              <div className="space-y-2 mt-4">
+              <div className="space-y-1 mt-2">
                 {activeTab !== 'HOSPITAL' && (
-                    <div className="flex items-start text-sm text-slate-500 font-medium">
-                    <span className="bg-slate-100 px-2 py-0.5 rounded text-[10px] font-bold mr-2 uppercase text-slate-400">
+                    <div className="flex items-start text-xs text-slate-500 font-medium">
+                    <span className="bg-slate-100 px-1.5 rounded text-[9px] font-bold mr-2 uppercase text-slate-400">
                         {activeTab === 'MEDICO' ? 'ESP' : 'AREA'}
                     </span>
                     <span className="line-clamp-1 uppercase">{item.specialty || item.area || 'N/A'}</span>
                     </div>
                 )}
-                <div className="flex items-start text-sm text-slate-500">
-                  <MapPin className="h-4 w-4 mr-2 mt-0.5 flex-shrink-0 text-slate-400" />
-                  <span className="line-clamp-2 text-xs uppercase">{item.address || 'SIN DIRECCIÓN'}</span>
+                <div className="flex items-start text-xs text-slate-500">
+                  <MapPin className="h-3 w-3 mr-1 mt-0.5 flex-shrink-0 text-slate-400" />
+                  <span className="line-clamp-2 text-[10px] uppercase">{item.address || 'SIN DIRECCIÓN'}</span>
                 </div>
               </div>
               
-              <div className="mt-5 pt-4 border-t border-slate-100 flex items-center justify-between text-xs">
+              <div className="mt-3 pt-3 border-t border-slate-100 flex items-center justify-between text-[10px]">
                 <div className="flex items-center">
-                    <span className="text-slate-400 font-bold mr-2">EJECUTIVO:</span>
-                    <span className="bg-slate-100 text-slate-600 px-2 py-1 rounded font-bold uppercase">{item.executive}</span>
+                    <span className="text-slate-400 font-bold mr-1">EJECUTIVO:</span>
+                    <span className="bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded font-bold uppercase">{item.executive}</span>
                 </div>
-                <ArrowRight className="w-4 h-4 text-slate-300 group-hover:text-blue-500 group-hover:translate-x-1 transition-all" />
+                <ArrowRight className="w-3 h-3 text-slate-300" />
               </div>
             </div>
           </div>
         ))}
       </div>
       
+      {filteredItems.length > visibleCount && (
+          <div className="flex justify-center pt-4">
+              <button 
+                onClick={handleLoadMore}
+                className="bg-white border border-slate-200 text-slate-600 px-6 py-2 rounded-xl text-xs font-bold hover:bg-slate-50 flex items-center shadow-sm"
+              >
+                  <ChevronDown className="w-4 h-4 mr-2" />
+                  Cargar más ({filteredItems.length - visibleCount} restantes)
+              </button>
+          </div>
+      )}
+      
       {filteredItems.length === 0 && (
-          <div className="text-center py-20 bg-slate-50 rounded-3xl border border-dashed border-slate-200">
-              <p className="text-slate-400 text-lg font-medium">No se encontraron registros en {activeTab}.</p>
+          <div className="text-center py-10 bg-slate-50 rounded-xl border border-dashed border-slate-200">
+              <p className="text-slate-400 text-sm font-medium">No se encontraron registros.</p>
           </div>
       )}
 
       {isAddModalOpen && (
-          <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-              <div className="bg-white rounded-3xl shadow-2xl w-full max-w-lg overflow-hidden animate-fadeIn scale-100 transform transition-all max-h-[90vh] overflow-y-auto">
-                  <div className="p-6 border-b border-slate-100 flex justify-between items-center sticky top-0 bg-white z-10">
-                      <h3 className="text-xl font-black text-slate-800">Registrar Nuevo {activeTab}</h3>
-                      <button onClick={resetForm} className="text-slate-400 hover:text-slate-600"><X className="h-6 w-6" /></button>
+          <div className="fixed inset-0 bg-black/30 backdrop-blur-none flex items-center justify-center z-50 p-4">
+              <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden max-h-[90vh] overflow-y-auto">
+                  <div className="p-5 border-b border-slate-100 flex justify-between items-center sticky top-0 bg-white z-10">
+                      <h3 className="text-lg font-black text-slate-800">Registrar Nuevo {activeTab}</h3>
+                      <button onClick={resetForm} className="text-slate-400 hover:text-slate-600"><X className="h-5 w-5" /></button>
                   </div>
                   
-                  <form onSubmit={handleAddSubmit} className="p-8 space-y-5" noValidate>
+                  <form onSubmit={handleAddSubmit} className="p-6 space-y-4" noValidate>
                       <div>
-                          <label className="block text-xs font-bold text-slate-400 uppercase mb-1.5 ml-1">
+                          <label className="block text-xs font-bold text-slate-400 uppercase mb-1">
                               {activeTab === 'HOSPITAL' ? 'Nombre del Hospital' : 'Nombre Completo'} <span className="text-red-500">*</span>
                           </label>
                           <input 
                               type="text" required
-                              className={`w-full border bg-slate-50 rounded-xl p-3 text-sm text-black focus:ring-2 focus:ring-blue-500 uppercase ${formSubmitted && !formData.name ? 'border-red-500' : 'border-slate-200'}`}
+                              className={`w-full border bg-slate-50 rounded-lg p-2 text-xs text-black focus:ring-1 focus:ring-blue-500 uppercase ${formSubmitted && !formData.name ? 'border-red-500' : 'border-slate-200'}`}
                               value={formData.name}
                               onChange={e => setFormData({...formData, name: e.target.value.toUpperCase()})}
                           />
                       </div>
 
                       {activeTab === 'MEDICO' && (
-                          <div className="grid grid-cols-2 gap-5">
+                          <div className="grid grid-cols-2 gap-4">
                               <div>
-                                  <label className="block text-xs font-bold text-slate-400 uppercase mb-1.5 ml-1">Especialidad <span className="text-red-500">*</span></label>
-                                  <select required className="w-full border border-slate-200 bg-slate-50 rounded-xl p-3 text-sm text-black outline-none"
+                                  <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Especialidad <span className="text-red-500">*</span></label>
+                                  <select required className="w-full border border-slate-200 bg-slate-50 rounded-lg p-2 text-xs text-black outline-none"
                                       value={formData.specialty} onChange={e => setFormData({...formData, specialty: e.target.value})}>
                                       <option value="">SELECCIONAR</option>
                                       <option value="GINECOLOGÍA">GINECOLOGÍA</option>
@@ -434,28 +445,28 @@ const DoctorList: React.FC<DoctorListProps> = ({ doctors, onAddDoctor, onImportD
                                   </select>
                               </div>
                               <div>
-                                  <label className="block text-xs font-bold text-slate-400 uppercase mb-1.5 ml-1">Hospital</label>
-                                  <input type="text" className="w-full border border-slate-200 bg-slate-50 rounded-xl p-3 text-sm text-black uppercase"
+                                  <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Hospital</label>
+                                  <input type="text" className="w-full border border-slate-200 bg-slate-50 rounded-lg p-2 text-xs text-black uppercase"
                                       value={formData.hospital} onChange={e => setFormData({...formData, hospital: e.target.value.toUpperCase()})} />
                               </div>
                           </div>
                       )}
 
                       <div>
-                          <label className="block text-xs font-bold text-slate-400 uppercase mb-1.5 ml-1">Dirección</label>
-                          <input type="text" className="w-full border border-slate-200 bg-slate-50 rounded-xl p-3 text-sm text-black uppercase"
+                          <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Dirección</label>
+                          <input type="text" className="w-full border border-slate-200 bg-slate-50 rounded-lg p-2 text-xs text-black uppercase"
                               value={formData.address} onChange={e => setFormData({...formData, address: e.target.value.toUpperCase()})} />
                       </div>
 
-                      <div className="grid grid-cols-2 gap-5">
+                      <div className="grid grid-cols-2 gap-4">
                           <div>
-                              <label className="block text-xs font-bold text-slate-400 uppercase mb-1.5 ml-1">Teléfono</label>
-                              <input type="text" className="w-full border border-slate-200 bg-slate-50 rounded-xl p-3 text-sm text-black"
+                              <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Teléfono</label>
+                              <input type="text" className="w-full border border-slate-200 bg-slate-50 rounded-lg p-2 text-xs text-black"
                                   value={formData.phone} onChange={e => setFormData({...formData, phone: e.target.value})} />
                           </div>
                           <div>
-                              <label className="block text-xs font-bold text-slate-400 uppercase mb-1.5 ml-1">Ejecutivo Asignado</label>
-                              <select className="w-full border border-slate-200 bg-slate-50 rounded-xl p-3 text-sm text-black"
+                              <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Ejecutivo Asignado</label>
+                              <select className="w-full border border-slate-200 bg-slate-50 rounded-lg p-2 text-xs text-black"
                                   value={formData.executive} onChange={e => setFormData({...formData, executive: e.target.value})}>
                                   {executives.filter(e => e !== 'TODOS').map(e => <option key={e} value={e}>{e}</option>)}
                                   <option value="SIN ASIGNAR">SIN ASIGNAR</option>
@@ -463,9 +474,9 @@ const DoctorList: React.FC<DoctorListProps> = ({ doctors, onAddDoctor, onImportD
                           </div>
                       </div>
 
-                      <div className="pt-6 flex justify-end gap-3 border-t border-slate-100 mt-2">
-                          <button type="button" onClick={resetForm} className="px-5 py-2.5 bg-white border border-slate-200 text-slate-600 font-bold hover:bg-slate-50 rounded-xl transition-colors">Cancelar</button>
-                          <button type="submit" className="px-6 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-bold shadow-sm transition-all active:scale-95">Guardar</button>
+                      <div className="pt-4 flex justify-end gap-2 border-t border-slate-100 mt-2">
+                          <button type="button" onClick={resetForm} className="px-4 py-2 bg-white border border-slate-200 text-slate-600 font-bold hover:bg-slate-50 rounded-lg text-xs">Cancelar</button>
+                          <button type="submit" className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-bold shadow-sm text-xs">Guardar</button>
                       </div>
                   </form>
               </div>
