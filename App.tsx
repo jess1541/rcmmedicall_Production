@@ -117,21 +117,27 @@ const App: React.FC = () => {
     } catch (e) { console.error("Update failed", e); }
   };
 
-  // Helper for batch imports (loops API calls - simple implementation)
+  // Helper for batch imports using BULK endpoint
   const importDoctors = async (newDoctors: Doctor[]) => {
-      setDoctors(prev => [...newDoctors, ...prev]);
-      // Process in chunks or sequential to avoid overwhelming server
-      for (const doc of newDoctors) {
-          try {
-              await fetch(`${API_URL}/doctors`, {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify(doc)
-              });
-          } catch (e) { console.error("Import failed for", doc.name, e); }
+      setDoctors(prev => [...newDoctors, ...prev]); // Optimistic
+      setIsSyncing(true);
+      
+      try {
+          const response = await fetch(`${API_URL}/doctors/bulk`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(newDoctors)
+          });
+          
+          if (!response.ok) throw new Error("Bulk import failed");
+          
+          alert("Importación exitosa. Los datos se han guardado en la base de datos.");
+      } catch (e) { 
+          console.error("Import failed", e); 
+          alert("Hubo un error guardando los datos en el servidor. Intente nuevamente.");
+      } finally {
+          fetchData(); // Sync with DB
       }
-      alert("Importación finalizada. Los datos se están sincronizando.");
-      fetchData();
   };
 
   const deleteDoctor = async (id: string) => {
@@ -235,7 +241,7 @@ const App: React.FC = () => {
                 <Route path="/" element={<Dashboard doctors={doctors} user={user} procedures={procedures} onImportBackup={importFullBackup} />} />
                 <Route path="/doctors" element={<DoctorList doctors={doctors} onAddDoctor={addDoctor} onImportDoctors={importDoctors} onDeleteDoctor={deleteDoctor} user={user} />} />
                 <Route path="/doctors/:id" element={<DoctorProfile doctors={doctors} onUpdate={updateDoctor} onDeleteVisit={handleDeleteVisit} user={user} />} />
-                <Route path="/calendar" element={<ExecutiveCalendar doctors={doctors} onUpdateDoctor={updateDoctor} onDeleteVisit={handleDeleteVisit} user={user} />} />
+                <Route path="/calendar" element={<ExecutiveCalendar doctors={doctors} onUpdateDoctors={importDoctors} onDeleteVisit={handleDeleteVisit} user={user} />} />
                 <Route path="/procedures" element={<ProceduresManager procedures={procedures} doctors={doctors} onAddProcedure={addProcedure} onUpdateProcedure={updateProcedure} onDeleteProcedure={deleteProcedure} user={user} />} />
                 <Route path="*" element={<Navigate to="/" replace />} />
                 </Routes>

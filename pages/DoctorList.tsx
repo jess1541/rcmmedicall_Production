@@ -39,7 +39,8 @@ const DoctorList: React.FC<DoctorListProps> = ({ doctors, onAddDoctor, onImportD
   });
 
   const executives = useMemo(() => {
-    const execs = new Set(doctors.map(d => d.executive));
+    // Normalize derived executives to ensure clean list
+    const execs = new Set(doctors.map(d => d.executive.trim().toUpperCase()));
     return ['TODOS', ...Array.from(execs).sort()];
   }, [doctors]);
 
@@ -50,7 +51,10 @@ const DoctorList: React.FC<DoctorListProps> = ({ doctors, onAddDoctor, onImportD
       
       const matchesSearch = doc.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
                             doc.address.toLowerCase().includes(searchTerm.toLowerCase());
-      const matchesExec = selectedExecutive === 'TODOS' || doc.executive === selectedExecutive;
+      
+      // Strict comparison for filtering
+      const docExec = doc.executive ? doc.executive.trim().toUpperCase() : 'SIN ASIGNAR';
+      const matchesExec = selectedExecutive === 'TODOS' || docExec === selectedExecutive;
       const matchesTab = category === activeTab;
       
       return matchesSearch && matchesExec && matchesTab;
@@ -142,23 +146,28 @@ const DoctorList: React.FC<DoctorListProps> = ({ doctors, onAddDoctor, onImportD
           // 5: Dirección, 6: Telefono, 7: Email, 8: Notas
 
           if (columns.length >= 2) { // Need at least name
-              const category = (columns[0] || 'MEDICO').toUpperCase() as any;
-              const name = (columns[1] || 'SIN NOMBRE').toUpperCase();
+              const category = (columns[0] || 'MEDICO').trim().toUpperCase() as any;
+              const name = (columns[1] || 'SIN NOMBRE').trim().toUpperCase();
               
+              // Normalize Executive Name (Critical for visibility)
+              let executive = (columns[2] || 'SIN ASIGNAR').trim().toUpperCase();
+              // Remove accidental special chars
+              executive = executive.replace(/['"]+/g, '');
+
               const initialSchedule: ScheduleSlot[] = days.map(day => ({ day, time: '', active: false }));
 
               const newDoc: Doctor = {
-                  id: `imp-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+                  id: `imp-${Date.now()}-${Math.floor(Math.random() * 10000)}`, // Added more randomness for bulk
                   category: ['MEDICO', 'ADMINISTRATIVO', 'HOSPITAL'].includes(category) ? category : 'MEDICO',
                   name: name,
-                  executive: (columns[2] || 'SIN ASIGNAR').toUpperCase(),
-                  specialty: (columns[3] || '').toUpperCase(),
-                  area: category === 'ADMINISTRATIVO' ? (columns[3] || '').toUpperCase() : '',
-                  hospital: (columns[4] || '').toUpperCase(),
-                  address: (columns[5] || '').toUpperCase(),
-                  phone: columns[6] || '',
-                  email: columns[7] || '',
-                  importantNotes: (columns[8] || '').toUpperCase(),
+                  executive: executive,
+                  specialty: (columns[3] || '').trim().toUpperCase(),
+                  area: category === 'ADMINISTRATIVO' ? (columns[3] || '').trim().toUpperCase() : '',
+                  hospital: (columns[4] || '').trim().toUpperCase(),
+                  address: (columns[5] || '').trim().toUpperCase(),
+                  phone: columns[6] ? columns[6].trim() : '',
+                  email: columns[7] ? columns[7].trim() : '',
+                  importantNotes: (columns[8] || '').trim().toUpperCase(),
                   visits: [],
                   schedule: initialSchedule,
                   isInsuranceDoctor: false
@@ -171,7 +180,6 @@ const DoctorList: React.FC<DoctorListProps> = ({ doctors, onAddDoctor, onImportD
       if (newDoctors.length > 0 && onImportDoctors) {
           if (window.confirm(`Se encontraron ${newDoctors.length} registros válidos. ¿Desea importarlos a la base de datos?`)) {
               onImportDoctors(newDoctors);
-              alert("Importación exitosa.");
           }
       } else {
           alert("No se pudieron procesar registros del archivo.");
@@ -226,7 +234,7 @@ const DoctorList: React.FC<DoctorListProps> = ({ doctors, onAddDoctor, onImportD
           id: `${activeTab.substring(0,3).toLowerCase()}-${Date.now()}`,
           category: activeTab,
           name: formData.name.toUpperCase(),
-          executive: formData.executive?.toUpperCase() || 'SIN ASIGNAR',
+          executive: formData.executive?.trim().toUpperCase() || 'SIN ASIGNAR',
           specialty: formData.specialty?.toUpperCase() || (activeTab === 'HOSPITAL' ? 'HOSPITAL' : ''),
           address: formData.address?.toUpperCase() || '',
           hospital: formData.hospital?.toUpperCase() || '',

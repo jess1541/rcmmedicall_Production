@@ -5,7 +5,7 @@ const path = require('path');
 
 const app = express();
 
-// Middleware
+// Middleware - Increased limit for bulk imports
 app.use(express.json({ limit: '50mb' })); 
 app.use(cors());
 
@@ -109,18 +109,37 @@ app.get('/api/doctors', async (req, res) => {
     }
 });
 
-// POST: Crear o Actualizar Doctor
+// POST: Crear o Actualizar Doctor (Individual)
 app.post('/api/doctors', async (req, res) => {
     const data = req.body;
     try {
         // Upsert en Sequelize
-        const [doctor, created] = await Doctor.upsert(data);
-        // Si es SQLite, upsert retorna boolean en created, si es Postgres retorna el objeto.
-        // Buscamos el objeto fresco para devolverlo consistentemente.
+        await Doctor.upsert(data);
         const result = await Doctor.findByPk(data.id);
         res.json(result);
     } catch (error) {
         console.error(error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// POST: Carga Masiva de Doctores (Bulk Upsert)
+app.post('/api/doctors/bulk', async (req, res) => {
+    const data = req.body; // Array of doctors
+    if (!Array.isArray(data)) {
+        return res.status(400).json({ error: "Se esperaba un arreglo de datos." });
+    }
+    try {
+        // updateOnDuplicate asegura que si el ID ya existe, se actualicen los campos
+        await Doctor.bulkCreate(data, {
+            updateOnDuplicate: [
+                'category', 'executive', 'name', 'specialty', 'hospital', 
+                'address', 'phone', 'email', 'importantNotes', 'updatedAt'
+            ]
+        });
+        res.json({ success: true, count: data.length, message: "Importación masiva completada." });
+    } catch (error) {
+        console.error("Bulk Insert Error:", error);
         res.status(500).json({ error: error.message });
     }
 });
